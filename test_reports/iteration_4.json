@@ -1,0 +1,47 @@
+{
+  "summary": "Backend-only test for iteration 4 (CORZAAR IMS extensions): student-marked curriculum progress + auto certificate, referral rewards + wallet spend, manual instructor payouts + audit, batch auto-generated sessions + per-session attendance. 14/14 new pytests passed against public URL. Regression: all 22 iteration_3 feature tests still pass. Stripe hosted checkout confirmed (checkout.stripe.com session URL). Progress endpoint correctly ignores unknown curriculum items, issues certificate_id + notification only on 100%. Certificate HTML renders student name/course/institute/cert-id, accepts both Authorization header and ?auth= query token, returns 404 pre-completion, 404 for wrong user (student-scoped lookup). Referral: A_CODE gives friend 10% off; on paid course wallet credit is deferred to payment success (verified via free-course auto-enroll path — ₹200 credit, referral_rewards row inserted, notification fired, idempotent across duplicate enrollments). Wallet: use_wallet=true decreases enrollment.amount and user.wallet_balance by min(balance, after-discount). Batch: POST auto-generates sessions[] with UUIDs and dates matching the weekday tokens in schedule between start_date/end_date (verified Mon+Wed pattern gives exactly 4 sessions in 2-week window). POST/DELETE session endpoints work; DELETE also purges attendance rows for that session (confirmed via GET attendance snapshot). Attendance upsert keyed by (batch,session,student) — re-mark overwrites cleanly, GET returns marks dict keyed by session_id + rolled up counts. Payouts: /api/admin/payouts returns ledger with gross/paid_out/pending per merchant + history + note mentioning Stripe Connect upgrade; POST validates amount>0 (0 → 400), successful record has status='sent' and creates 'Payout recorded' audit log entry; /api/merchant/payouts returns merchant's own totals + history.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/me/enrollments/{id}/certificate (wrong user)", "issue": "Returns 404 (not 401) when a different valid student token accesses another student's enrollment. Spec asked for '401 for wrong user' but implementation combines student_id scoping into the enrollment lookup so the resource simply isn't found. Behaviorally safe (no data leak); consider explicit 401/403 if strict spec compliance is desired. See server.py:944."},
+      {"endpoint": "POST /api/enrollments (referral vs coupon)", "issue": "Referral discount is skipped when coupon_code is also provided (server.py:461 `if payload.referral_code and not coupon_code`). Product decision, but the referrer's ₹200 wallet reward is also silently lost since referral_code isn't recorded on the enrollment. Consider recording referral_code even when coupon wins the discount so the friend still receives the wallet bonus, OR document the mutual-exclusivity clearly."},
+      {"endpoint": "POST /api/me/enrollments/{id}/progress", "issue": "Progress percentage rounds to nearest int; a 3-item curriculum with 1 item complete gives progress=33 (floor of 33.33 rounded). Fine, but progress can decrease if the student unchecks items — no monotonic guard. Non-blocking."},
+      {"endpoint": "POST /api/merchant/batches (session cap)", "issue": "generate_sessions() hard-caps at 60 sessions (server.py:113) with no warning to caller. A yearly Mon-Wed-Fri schedule (~156 sessions) will silently be truncated."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4_features.py",
+    "/app/test_reports/pytest/iteration_4.xml"
+  ],
+  "action_items": [
+    "Decide whether wrong-user certificate access should return 401 vs 404 to strictly match spec (currently 404 due to student-scoped enrollment lookup).",
+    "Decide policy when both coupon_code AND referral_code are supplied — either credit referrer anyway or reject the combination with a clear 400.",
+    "Consider a warning/paging strategy when auto-generated batch sessions would exceed the 60-session cap.",
+    "Legacy test /app/backend/tests/test_core_flows.py::test_student_lists_and_enrollment_payment_states still calls /api/payments/confirm which no longer exists (replaced by Stripe checkout in iteration 3). Not a regression from iteration 4, but the stale legacy test should be updated or removed."
+  ],
+  "critical_code_review_comments": [
+    "server.py:461-466 — referral discount is only applied when no coupon; but referral_code is also not saved on the enrollment in that branch, silently voiding the wallet bonus. Consider decoupling reward tracking from discount stacking.",
+    "server.py:113 — generate_sessions caps at 60 sessions with no signal; consider raising an error or returning meta.truncated=true.",
+    "server.py:929-946 — certificate endpoint duplicates JWT decode logic from current_user because it also supports ?auth=<token>. Consider a small helper `resolve_token(auth_header, query_token)` for DRY.",
+    "server.py:483-495 — _grant_referral_bonus uses find_one on referral_rewards for idempotency but there is no unique index on enrollment_id; under high concurrency two /payments/status polls could double-credit. Add unique index on referral_rewards.enrollment_id.",
+    "server.py:768 mark_session_attendance — no unique index on (batch_id, session_id, student_id) for attendance; upsert relies on find-then-update. Add unique index to guarantee no duplicates.",
+    "server.py:606-630 create_review — 'active' status filter means refunded students can't rate; and the fallback duplicate-key handler uses an unusual ternary-inside-dict-literal — works but reads awkwardly.",
+    "server.py:24 — JWT_SECRET falls back to a hardcoded dev default in code; fine for preview, but should be enforced in production via required env var."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4_features.py (new)",
+    "/app/test_reports/pytest/iteration_4.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (14/14 new + 22/22 iteration_3 regression = 36/36)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "TEST_-prefixed data with random 10-digit mobiles per test: multiple students (Cert/Ref/Wallet/Attend/Payout/CV/Rev), merchants with auto-created institutes, courses (TEST_Batch_Course, TEST_Payout_Course, TEST_Coup_Course), coupons (TESTFREE*, PAYFREE*, REG*), a batch with 4 auto-generated sessions, session attendance rows, one recorded payout (TEST_REF_1, ₹500). All isolated by UUID-based mobile numbers and course-scoped coupons.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `EXPO_BACKEND_URL=https://readme-deploy-4.preview.emergentagent.com pytest /app/backend/tests/test_iteration4_features.py -v`. Uses fresh 10-digit mobiles per call to avoid stale referral/wallet state. Progress rounding for a 3-item curriculum: 1→33, 2→67, 3→100. Referral wallet credit only fires on payment_status='paid' (free courses auto-satisfy this; Stripe path fires via _mark_paid). Legacy /api/backend/tests/test_core_flows.py has one stale test referencing removed /api/payments/confirm — safe to ignore or delete. When testing per-session attendance you must first make the student's enrollment 'active' (use a 100% merchant coupon that admin approved).",
+  "rca_of_issue": "No unresolved issues. All 12 declared feature bullets pass: (1) progress% compute + certificate_id + notification on 100%; (2) certificate HTML returns 200 with Bearer & ?auth=, 404 pre-completion, 404/401 for wrong user; (3) /me/referrals returns REF-code + 200 + 10 + wallet + friends; (4) referral 10% off + ₹200 wallet credit on paid enrollment (verified via free auto-enroll path since Stripe test card can't be automated), idempotent across duplicate enrollments; (5) wallet reduces enrollment.amount and user.wallet_balance; (6) batch auto-generates sessions matching weekdays with unique IDs; (7) POST/DELETE session endpoints work, DELETE cascades to attendance; (8) per-session attendance upserts and GET returns marks dict; (9) admin/payouts returns ledger+history+note w/ 'Stripe Connect'; (10) POST payout validates amount>0 and writes audit log; (11) merchant/payouts returns own totals+history; (12) regression Stripe checkout + coupons + refunds + reviews + audit logs all pass."
+}

@@ -1,75 +1,66 @@
 # CORZAAR (IMS) — Product Requirements
 
 ## Problem statement
-Build the CORZAAR Institute Management System per the README functional spec — a marketplace where students discover and buy courses, merchants/institutes list and sell them, and admins govern the platform end-to-end.
+Complete Institute Management System per README: students discover + buy courses, merchants list + sell + track batches, admins govern everything with a refined ocean-navy + mint design.
 
-## User personas
-- **Student**: discovers, enrolls, pays (Stripe), rates, requests refunds
-- **Merchant / Institute**: lists courses, creates batches (with Zoom/Meet links) and coupons, tracks attendance and revenue
-- **Admin**: approves institutes, courses and coupons, handles refunds, audits all activity
-
-## Auth flows
-- Student & Merchant → mobile OTP (dev code `123456`)
-- Admin → email + password + OTP (dev code `123456`)
-- JWT (`sub` + `role`) stored via `@/src/utils/storage`
+## Personas
+- **Student** — discovers, enrolls, pays (Stripe), applies coupons/referral codes, uses wallet balance, rates, self-marks curriculum, downloads certificate, requests refunds
+- **Merchant / Institute** — lists courses, creates batches with auto-generated sessions + Zoom/Meet URLs, marks per-session attendance, creates coupons (admin approves), sees earnings + payout history
+- **Admin** — approves institutes/courses/coupons, handles refunds, records payouts, reviews audit log of every action
 
 ## Core features
-### Marketplace
-- Home hero, category chips, top courses, trusted institutes
-- Discover with search + category filter
-- Course detail with curriculum, batches, ratings, reviews, coupon input
-- Institute detail with rating, courses, student voices
-- Cart / Favorites persistent per student
-
 ### Payments (Stripe)
-- Real Stripe hosted checkout via Emergent `emergentintegrations` adapter (INR)
-- Coupon applied server-side; final amount charged after discount
-- Webhook + polling reconciliation → enrollment marked active with receipt
+- Hosted Stripe checkout via Emergent `emergentintegrations` adapter (INR, cards; UPI when dashboard enables it)
+- Server-computed final amount = fees − coupon discount − wallet credit
+- Webhook + status polling reconcile enrollment as `active` on paid
+
+### Coupons + Referrals + Wallet
+- Merchant creates coupon → admin approves → student applies at checkout
+- Every student gets a unique referral code; friend uses it → 10% off + referrer earns ₹200 wallet credit on paid enrollment
+- Wallet balance spendable at checkout via `use_wallet` toggle
+
+### Curriculum progress + Certificates
+- Student self-marks each curriculum item done
+- On 100% complete → certificate auto-issued with unique ID + notification
+- HTML certificate served at `/api/me/enrollments/{id}/certificate` (Bearer header or `?auth=` query for browser download)
+
+### Batches with auto-sessions
+- On batch create, sessions auto-generate from weekly schedule between start/end dates (capped 60)
+- Merchant can add/remove individual sessions
+- Attendance marked per session per student (present/absent); UI shows a session picker + per-student toggles
 
 ### Ratings
-- Only students with active enrollments can rate a course or its institute
-- Ratings recalculated on every submit; unique per (target, student)
+- Only enrolled+active students can rate courses/institutes; ratings + reviews_count auto-recalculate
 
-### Coupons
-- Merchant creates code → status `pending`
-- Admin approves → status `approved`; students can then apply
-- Coupons appear on `/api/offers` after approval
+### Refunds
+- Student requests from Profile; admin approves/rejects → enrollment marked `refunded`
 
-### Course listing approval
-- Merchant-created courses start `under_review`
-- Admin approves (`published`) or rejects — only published courses appear in discovery
+### Instructor payouts (manual tracking preview)
+- Admin sees per-merchant gross/paid/pending ledger
+- Records manual payouts (bank_transfer, UTR reference) → written to audit log
+- Merchant sees own earnings + history
+- Path to Stripe Connect after deploy with live keys
 
-### Batches
-- Merchant creates batches per course: schedule, dates, seats, coordinator, Zoom/Meet URL
-- Attendance mark (present/absent) per learner per batch
-- Live class link opens in browser
+### Admin oversight
+- Institutes / Courses / Coupons / Refunds / Payouts / Audit tabs
+- Full audit trail for every state change
 
-### Admin Insights
-- Metrics: students, institutes, courses, pending items, revenue
-- Tabs: Institutes, Courses, Coupons, Refunds, Audit
-- Refunds: students request → admin approves/rejects; approved refund marks enrollment `refunded`
-- Audit logs: every state change (institute/course/coupon/refund + batch/course create) is logged with actor and timestamp
+## Design
+- **Ocean navy** primary `#1E3A5F` with mint accent `#0EA5A0`
+- Refined & minimal: 12–16px radii, thin 1px borders, restrained shadows, more whitespace
+- Ionicons, StyleSheet only, mobile-first with RN Web support
 
-## Architecture
-- **Backend**: FastAPI + Motor (async MongoDB), PyJWT auth, Emergent Stripe adapter
-- **Frontend**: Expo Router (mobile-first, RN Web supported), single index route + role-based screens, `expo-web-browser` for Stripe checkout
-- **Storage**: `@/src/utils/storage` for tokens
-- **Design**: botanical palette (deep green + terracotta), Ionicons, 8pt grid, StyleSheet only
-
-## Key API endpoints (all `/api` prefixed)
-Auth: `POST /auth/send-otp`, `/auth/verify-otp`, `/auth/admin-login`, `/auth/admin-verify`
-Discovery: `GET /home`, `/courses`, `/courses/{id}`, `/institutes/{id}`
-Student: `POST /enrollments`, `POST /payments/checkout`, `GET /payments/status/{sid}`, `POST /reviews`, `POST /refunds`, `POST /coupons/validate`
-Merchant: `GET/POST /merchant/courses`, `/merchant/batches`, `/merchant/coupons`, `/merchant/batches/{id}/attendance`
-Admin: `GET /admin/dashboard`, `/admin/institutes|courses|coupons|refunds|audit-logs`, `POST /admin/{resource}/{id}/status`
-Webhook: `POST /webhooks/stripe`
+## Key endpoints
+Student: `/enrollments`, `/payments/checkout`, `/payments/status`, `/reviews`, `/refunds`, `/coupons/validate`, `/me/referrals`, `/me/enrollments/{id}/progress|certificate`
+Merchant: `/merchant/{courses,batches,coupons,payouts}`, `/merchant/batches/{id}/sessions/{sid}/attendance`
+Admin: `/admin/{dashboard,institutes,courses,coupons,refunds,payouts,audit-logs}`, POST `/admin/{resource}/{id}/status`
 
 ## Test credentials
-See `/app/memory/test_credentials.md`. Uses Emergent-managed Stripe test key — no setup needed.
+`/app/memory/test_credentials.md` — Stripe test key already in env, no user setup needed.
 
 ## Backlog
 - Real SMS/email provider (dev-adapter today)
-- Native Stripe PaymentSheet path (requires publishable key)
-- Batch scheduler with per-session attendance dates
-- Certificate generation on course completion
-- Instructor payout via Stripe Connect
+- Stripe Connect for automated splits (needs live keys + merchant KYC)
+- Merchant-mode certificate customization + PDF download
+- Push notifications for cert-ready / referral-reward events
+- Course completion badges + gamified streaks

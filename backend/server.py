@@ -84,6 +84,39 @@ async def recalc_rating(collection: str, target_id: str) -> None:
     await db[collection].update_one({"id": target_id}, {"$set": {"rating": avg, "reviews_count": len(reviews)}})
 
 
+def gen_referral(user_id: str) -> str:
+    return f"REF{user_id[:4].upper()}{secrets.token_hex(2).upper()}"
+
+
+REFERRAL_REWARD = 200  # ₹ credited to referrer wallet on friend's paid enrollment
+REFERRAL_DISCOUNT_PERCENT = 10
+
+
+def generate_sessions(start_date: str, end_date: str, schedule: str) -> List[Dict[str, Any]]:
+    """Auto-generate session dates from start->end based on weekly schedule string."""
+    from datetime import date, timedelta
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return []
+    if end < start:
+        return []
+    # find weekdays mentioned in schedule
+    weekdays = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    lower = schedule.lower()
+    matched = [num for name, num in weekdays.items() if name in lower]
+    if not matched:
+        matched = [0, 2, 4]  # default Mon/Wed/Fri
+    sessions = []
+    cur = start
+    while cur <= end and len(sessions) < 60:
+        if cur.weekday() in matched:
+            sessions.append({"id": str(uuid.uuid4()), "date": cur.isoformat(), "topic": ""})
+        cur += timedelta(days=1)
+    return sessions
+
+
 # ---------- Models ----------
 class OtpRequest(BaseModel):
     mobile: str = Field(min_length=8, max_length=15)
@@ -125,6 +158,8 @@ class EnrollmentCreate(BaseModel):
     course_id: str
     batch_id: Optional[str] = None
     coupon_code: Optional[str] = None
+    referral_code: Optional[str] = None
+    use_wallet: bool = False
 
 
 class CheckoutCreate(BaseModel):
@@ -192,6 +227,28 @@ class CouponValidate(BaseModel):
     course_id: str
 
 
+class ProgressUpdate(BaseModel):
+    completed: List[str]
+
+
+class SessionCreate(BaseModel):
+    date: str
+    topic: Optional[str] = None
+
+
+class SessionAttendance(BaseModel):
+    student_id: str
+    present: bool = True
+
+
+class PayoutRecord(BaseModel):
+    merchant_id: str
+    amount: float
+    method: str = "bank_transfer"
+    reference: str = ""
+    notes: str = ""
+
+
 # ---------- Seed ----------
 @app.on_event("startup")
 async def seed_demo_data() -> None:
@@ -236,11 +293,16 @@ async def verify_otp(payload: OtpVerify) -> Dict[str, Any]:
         raise HTTPException(400, "Invalid OTP. Please try again.")
     user = await db.users.find_one({"mobile": payload.mobile, "role": payload.role}, {"_id": 0})
     if not user:
-        user = {"id": str(uuid.uuid4()), "mobile": payload.mobile, "role": payload.role, "full_name": payload.full_name or "New learner", "status": "active", "profile_complete": False, "created_at": now()}
+        uid = str(uuid.uuid4())
+        user = {"id": uid, "mobile": payload.mobile, "role": payload.role, "full_name": payload.full_name or "New learner", "status": "active", "profile_complete": False, "referral_code": gen_referral(uid), "wallet_balance": 0.0, "created_at": now()}
         await db.users.insert_one(user.copy())
         # auto-create a merchant institute shell so they can list courses
         if payload.role == "merchant":
             await db.institutes.insert_one({"id": f"inst-{user['id'][:8]}", "name": "My Institute", "city": "Set your city", "rating": 0, "reviews_count": 0, "accreditation": "Pending", "students": "0", "description": "Edit your institute profile from the merchant portal.", "image_key": "campus", "status": "pending", "merchant_id": user["id"]})
+    if not user.get("referral_code"):
+        rc = gen_referral(user["id"])
+        await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": rc, "wallet_balance": user.get("wallet_balance", 0.0)}})
+        user["referral_code"] = rc
     if payload.role == "merchant" and user.get("login_enabled") is False:
         raise HTTPException(403, "Access denied — contact admin")
     return {"access_token": token_for(user), "refresh_token": secrets.token_urlsafe(32), "user": public(user), "next": "profile" if not user.get("profile_complete", True) and payload.role == "student" else "dashboard"}
@@ -388,6 +450,7 @@ async def enroll(payload: EnrollmentCreate, user: Dict[str, Any] = Depends(requi
     fees = float(course.get("fees") or 0)
     discount = 0.0
     coupon_code = None
+    referral_used = None
     if payload.coupon_code and fees > 0:
         try:
             info = await validate_coupon(CouponValidate(code=payload.coupon_code, course_id=payload.course_id), user)
@@ -395,13 +458,41 @@ async def enroll(payload: EnrollmentCreate, user: Dict[str, Any] = Depends(requi
             coupon_code = info["code"]
         except HTTPException:
             pass
-    final = max(0, fees - discount)
+    if payload.referral_code and not coupon_code:
+        referrer = await db.users.find_one({"referral_code": payload.referral_code.upper(), "role": "student"}, {"_id": 0})
+        if referrer and referrer["id"] != user["id"]:
+            if fees > 0:
+                discount = round(fees * REFERRAL_DISCOUNT_PERCENT / 100, 2)
+            referral_used = payload.referral_code.upper()
+    wallet_used = 0.0
+    if payload.use_wallet:
+        after_discount = max(0.0, fees - discount)
+        wallet_used = min(float(user.get("wallet_balance") or 0), after_discount)
+    final = max(0.0, fees - discount - wallet_used)
     status = "active" if final == 0 else "pending_payment"
-    enrollment = {"id": str(uuid.uuid4()), "student_id": user["id"], "course_id": payload.course_id, "batch_id": payload.batch_id, "status": status, "progress": 0, "amount": final, "original_amount": fees, "discount": discount, "coupon_code": coupon_code, "payment_status": "paid" if final == 0 else "pending", "created_at": now()}
+    enrollment = {"id": str(uuid.uuid4()), "student_id": user["id"], "course_id": payload.course_id, "batch_id": payload.batch_id, "status": status, "progress": 0, "completed_items": [], "amount": final, "original_amount": fees, "discount": discount, "wallet_used": wallet_used, "coupon_code": coupon_code, "referral_code": referral_used, "payment_status": "paid" if final == 0 else "pending", "created_at": now()}
     await db.enrollments.insert_one(enrollment.copy())
+    if wallet_used:
+        await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -wallet_used}})
     if final == 0:
         await audit(user, "Free enrollment", "Enrollments", course["title"], enrollment["id"])
+        await _grant_referral_bonus(enrollment)
     return enrollment
+
+
+async def _grant_referral_bonus(enrollment: Dict[str, Any]) -> None:
+    code = enrollment.get("referral_code")
+    if not code:
+        return
+    referrer = await db.users.find_one({"referral_code": code}, {"_id": 0})
+    if not referrer:
+        return
+    # avoid double-crediting
+    if await db.referral_rewards.find_one({"enrollment_id": enrollment["id"]}):
+        return
+    await db.users.update_one({"id": referrer["id"]}, {"$inc": {"wallet_balance": REFERRAL_REWARD}})
+    await db.referral_rewards.insert_one({"id": str(uuid.uuid4()), "referrer_id": referrer["id"], "referred_id": enrollment["student_id"], "enrollment_id": enrollment["id"], "amount": REFERRAL_REWARD, "created_at": now()})
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": referrer["id"], "title": "Referral reward credited", "body": f"₹{REFERRAL_REWARD} added to your CORZAAR wallet.", "kind": "reward", "created_at": now(), "read": False})
 
 
 def stripe_client(request: Optional[Request] = None) -> StripeCheckout:
@@ -473,6 +564,9 @@ async def _mark_paid(session_id: str, metadata: Dict[str, Any], payment_intent: 
     await db.payments.update_one({"stripe_session_id": session_id}, {"$set": update})
     if enrollment_id:
         await db.enrollments.update_one({"id": enrollment_id}, {"$set": {"status": "active", "payment_status": "paid", "receipt": receipt, "paid_at": now()}})
+        enrollment = await db.enrollments.find_one({"id": enrollment_id}, {"_id": 0})
+        if enrollment:
+            await _grant_referral_bonus(enrollment)
 
 
 @api.get("/payments/return", response_class=HTMLResponse)
@@ -503,7 +597,7 @@ async def stripe_webhook(request: Request, stripe_signature: Optional[str] = Hea
 async def enrollments(user: Dict[str, Any] = Depends(require_roles("student"))) -> List[Dict[str, Any]]:
     rows = public_many(await db.enrollments.find({"student_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50))
     for row in rows:
-        course = await db.courses.find_one({"id": row["course_id"]}, {"_id": 0, "title": 1, "image_key": 1, "duration": 1, "institute_id": 1})
+        course = await db.courses.find_one({"id": row["course_id"]}, {"_id": 0, "title": 1, "image_key": 1, "duration": 1, "institute_id": 1, "curriculum": 1})
         row["course"] = public(course)
     return rows
 
@@ -631,10 +725,30 @@ async def merchant_batch(payload: BatchCreate, user: Dict[str, Any] = Depends(re
     course = await db.courses.find_one({"id": payload.course_id, "merchant_id": user["id"]}, {"_id": 0, "title": 1})
     if not course:
         raise HTTPException(400, "Course not owned by this merchant")
-    batch = {"id": str(uuid.uuid4()), **payload.model_dump(), "merchant_id": user["id"], "course_title": course["title"], "status": "active", "enrolled": 0, "created_at": now()}
+    sessions = generate_sessions(payload.start_date, payload.end_date, payload.schedule)
+    batch = {"id": str(uuid.uuid4()), **payload.model_dump(), "merchant_id": user["id"], "course_title": course["title"], "status": "active", "enrolled": 0, "sessions": sessions, "created_at": now()}
     await db.batches.insert_one(batch.copy())
     await audit(user, "Batch created", "Batches", course["title"], batch["id"])
     return batch
+
+
+@api.post("/merchant/batches/{batch_id}/sessions")
+async def add_session(batch_id: str, payload: SessionCreate, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    batch = await db.batches.find_one({"id": batch_id, "merchant_id": user["id"]}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    session = {"id": str(uuid.uuid4()), "date": payload.date, "topic": payload.topic or ""}
+    await db.batches.update_one({"id": batch_id}, {"$push": {"sessions": session}})
+    return session
+
+
+@api.delete("/merchant/batches/{batch_id}/sessions/{session_id}")
+async def remove_session(batch_id: str, session_id: str, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    result = await db.batches.update_one({"id": batch_id, "merchant_id": user["id"]}, {"$pull": {"sessions": {"id": session_id}}})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Batch not found")
+    await db.attendance.delete_many({"session_id": session_id})
+    return {"removed": session_id}
 
 
 @api.get("/merchant/batches/{batch_id}/attendance")
@@ -647,17 +761,29 @@ async def batch_attendance(batch_id: str, user: Dict[str, Any] = Depends(require
     for e in enrolled:
         s = await db.users.find_one({"id": e["student_id"]}, {"_id": 0, "id": 1, "full_name": 1, "mobile": 1})
         if s:
-            marks = await db.attendance.find({"batch_id": batch_id, "student_id": s["id"]}, {"_id": 0}).to_list(200)
-            students.append({"id": s["id"], "name": s.get("full_name") or "Learner", "mobile": s.get("mobile"), "sessions": len(marks), "present": sum(1 for m in marks if m.get("present"))})
+            marks = await db.attendance.find({"batch_id": batch_id, "student_id": s["id"]}, {"_id": 0}).to_list(500)
+            students.append({"id": s["id"], "name": s.get("full_name") or "Learner", "mobile": s.get("mobile"), "sessions": len(marks), "present": sum(1 for m in marks if m.get("present")), "marks": {m.get("session_id"): m.get("present") for m in marks}})
     return {"batch": public(batch), "students": students}
 
 
-@api.post("/merchant/batches/{batch_id}/attendance")
-async def mark_attendance(batch_id: str, payload: AttendanceMark, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+@api.post("/merchant/batches/{batch_id}/sessions/{session_id}/attendance")
+async def mark_session_attendance(batch_id: str, session_id: str, payload: SessionAttendance, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
     batch = await db.batches.find_one({"id": batch_id, "merchant_id": user["id"]}, {"_id": 0})
     if not batch:
         raise HTTPException(404, "Batch not found")
-    entry = {"id": str(uuid.uuid4()), "batch_id": batch_id, "student_id": payload.student_id, "present": payload.present, "date": payload.date or now(), "marked_by": user["id"]}
+    if not any(sess.get("id") == session_id for sess in batch.get("sessions", [])):
+        raise HTTPException(404, "Session not found")
+    await db.attendance.update_one({"batch_id": batch_id, "session_id": session_id, "student_id": payload.student_id}, {"$set": {"batch_id": batch_id, "session_id": session_id, "student_id": payload.student_id, "present": payload.present, "marked_by": user["id"], "marked_at": now()}}, upsert=True)
+    return {"batch_id": batch_id, "session_id": session_id, "student_id": payload.student_id, "present": payload.present}
+
+
+@api.post("/merchant/batches/{batch_id}/attendance")
+async def mark_attendance_legacy(batch_id: str, payload: AttendanceMark, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    # Legacy path — kept for backward compat with clients that don't specify a session.
+    batch = await db.batches.find_one({"id": batch_id, "merchant_id": user["id"]}, {"_id": 0})
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    entry = {"id": str(uuid.uuid4()), "batch_id": batch_id, "session_id": "legacy", "student_id": payload.student_id, "present": payload.present, "date": payload.date or now(), "marked_by": user["id"]}
     await db.attendance.insert_one(entry.copy())
     return entry
 
@@ -774,6 +900,135 @@ async def admin_audit_logs(user: Dict[str, Any] = Depends(require_roles("admin")
 @api.get("/admin/activity")
 async def admin_activity(user: Dict[str, Any] = Depends(require_roles("admin"))) -> List[Dict[str, Any]]:
     return await admin_audit_logs(user)
+
+
+# ---------- Progress & Certificates ----------
+@api.post("/me/enrollments/{enrollment_id}/progress")
+async def update_progress(enrollment_id: str, payload: ProgressUpdate, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, Any]:
+    enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
+    if not enrollment:
+        raise HTTPException(404, "Enrollment not found")
+    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0, "curriculum": 1, "title": 1})
+    if not course:
+        raise HTTPException(404, "Course not found")
+    curriculum = course.get("curriculum") or []
+    completed = [c for c in payload.completed if c in curriculum]
+    progress = int(round(len(completed) / max(1, len(curriculum)) * 100))
+    updates = {"completed_items": completed, "progress": progress}
+    if curriculum and len(completed) == len(curriculum) and not enrollment.get("certificate_id"):
+        cert_id = f"CZ-CERT-{enrollment_id[:8].upper()}"
+        updates["certificate_id"] = cert_id
+        updates["completed_at"] = now()
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "title": "Certificate ready", "body": f"You completed {course.get('title', 'a course')}. Download your certificate.", "kind": "cert", "created_at": now(), "read": False})
+    await db.enrollments.update_one({"id": enrollment_id}, {"$set": updates})
+    fresh = await db.enrollments.find_one({"id": enrollment_id}, {"_id": 0})
+    return public(fresh) or {}
+
+
+@api.get("/me/enrollments/{enrollment_id}/certificate", response_class=HTMLResponse)
+async def certificate(enrollment_id: str, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> str:
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Authentication required")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "Invalid session") from exc
+    user = await db.users.find_one({"id": payload.get("sub"), "role": "student"}, {"_id": 0})
+    if not user:
+        raise HTTPException(401, "User not found")
+    enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
+    if not enrollment or not enrollment.get("certificate_id"):
+        raise HTTPException(404, "Certificate not available yet")
+    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
+    institute = await db.institutes.find_one({"id": course.get("institute_id")}, {"_id": 0}) or {}
+    name = user.get("full_name") or "CORZAAR learner"
+    completed_at = enrollment.get("completed_at", "")[:10]
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>CORZAAR Certificate · {name}</title><style>
+    :root{{color-scheme:light}}body{{font-family:'Georgia',serif;background:#F7F9FC;color:#0F1E33;margin:0;padding:24px;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+    .cert{{background:#fff;max-width:820px;width:100%;padding:56px 48px;border-radius:20px;border:1px solid #E2E8F0;box-shadow:0 30px 60px rgba(15,30,51,.08);text-align:center;position:relative;overflow:hidden}}
+    .cert::before{{content:'';position:absolute;inset:16px;border:2px solid #1E3A5F;border-radius:14px;pointer-events:none;opacity:.6}}
+    .brand{{font-family:-apple-system,system-ui,sans-serif;letter-spacing:6px;font-size:12px;color:#3B5F84;text-transform:uppercase;font-weight:800}}
+    h1{{font-size:44px;color:#1E3A5F;margin:24px 0 8px;letter-spacing:-.5px}}
+    .lead{{color:#64748B;font-family:-apple-system,system-ui,sans-serif;font-size:14px}}
+    h2{{font-size:34px;color:#0F1E33;margin:28px 0 6px;font-weight:700}}
+    .course{{font-size:20px;color:#1E3A5F;margin-top:8px;font-weight:700}}
+    .meta{{margin-top:26px;color:#64748B;font-family:-apple-system,system-ui,sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase}}
+    .row{{display:flex;justify-content:space-between;margin-top:44px;font-family:-apple-system,system-ui,sans-serif}}
+    .row div{{text-align:center;font-size:12px;color:#64748B}}
+    .row strong{{display:block;color:#0F1E33;font-size:14px;margin-bottom:6px;letter-spacing:.5px}}
+    .seal{{position:absolute;right:56px;bottom:56px;width:80px;height:80px;border-radius:50%;background:#0EA5A0;color:#fff;display:flex;align-items:center;justify-content:center;font-family:-apple-system,system-ui,sans-serif;font-size:11px;font-weight:800;letter-spacing:1px;text-align:center;line-height:14px;padding:8px;box-sizing:border-box;transform:rotate(-8deg)}}
+    </style></head><body><div class=cert>
+      <div class=brand>CORZAAR · Certificate of Completion</div>
+      <h1>Certificate of Completion</h1>
+      <p class=lead>This is to certify that</p>
+      <h2>{name}</h2>
+      <p class=lead>has successfully completed</p>
+      <p class=course>{course.get('title', 'the CORZAAR course')}</p>
+      <p class=meta>Awarded by {institute.get('name', 'CORZAAR')} · {completed_at}</p>
+      <div class=row>
+        <div><strong>Certificate ID</strong>{enrollment['certificate_id']}</div>
+        <div><strong>Issued</strong>{completed_at}</div>
+        <div><strong>Institute</strong>{institute.get('name', 'CORZAAR')}</div>
+      </div>
+      <div class=seal>CORZAAR<br>VERIFIED</div>
+    </div></body></html>"""
+
+
+# ---------- Referrals & Wallet ----------
+@api.get("/me/referrals")
+async def my_referrals(user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, Any]:
+    code = user.get("referral_code") or gen_referral(user["id"])
+    if not user.get("referral_code"):
+        await db.users.update_one({"id": user["id"]}, {"$set": {"referral_code": code}})
+    rewards = public_many(await db.referral_rewards.find({"referrer_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50))
+    friends = []
+    for r in rewards:
+        friend = await db.users.find_one({"id": r["referred_id"]}, {"_id": 0, "full_name": 1, "mobile": 1})
+        friends.append({"amount": r["amount"], "created_at": r["created_at"], "friend_name": (friend or {}).get("full_name") or "A friend"})
+    return {"code": code, "reward_per_referral": REFERRAL_REWARD, "discount_percent": REFERRAL_DISCOUNT_PERCENT, "wallet_balance": float(user.get("wallet_balance") or 0), "friends": friends, "count": len(friends)}
+
+
+# ---------- Instructor Payouts (manual tracking) ----------
+async def _merchant_earnings(merchant_id: str) -> Dict[str, float]:
+    course_ids = [c["id"] for c in await db.courses.find({"merchant_id": merchant_id}, {"_id": 0, "id": 1}).to_list(500)]
+    paid = await db.enrollments.find({"course_id": {"$in": course_ids}, "payment_status": "paid"}, {"_id": 0, "amount": 1}).to_list(2000)
+    gross = sum(float(e.get("amount") or 0) for e in paid)
+    already = sum(float(p.get("amount") or 0) for p in await db.payouts.find({"merchant_id": merchant_id, "status": "sent"}, {"_id": 0, "amount": 1}).to_list(500))
+    return {"gross": gross, "paid_out": already, "pending": max(0.0, gross - already)}
+
+
+@api.get("/admin/payouts")
+async def admin_payouts(user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    merchants = public_many(await db.users.find({"role": "merchant"}, {"_id": 0}).to_list(500))
+    ledger: List[Dict[str, Any]] = []
+    for m in merchants:
+        earnings = await _merchant_earnings(m["id"])
+        institute = await db.institutes.find_one({"merchant_id": m["id"]}, {"_id": 0, "name": 1, "city": 1})
+        ledger.append({"merchant_id": m["id"], "merchant_name": m.get("full_name") or m.get("mobile"), "institute": public(institute), **earnings})
+    history = public_many(await db.payouts.find({}, {"_id": 0}).sort("created_at", -1).to_list(200))
+    return {"ledger": ledger, "history": history, "note": "Manual tracking in preview. After you deploy with live Stripe keys, upgrade to Stripe Connect for automated splits."}
+
+
+@api.post("/admin/payouts")
+async def record_payout(payload: PayoutRecord, user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    if payload.amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+    payout = {"id": str(uuid.uuid4()), **payload.model_dump(), "status": "sent", "recorded_by": user["id"], "created_at": now()}
+    await db.payouts.insert_one(payout.copy())
+    await audit(user, "Payout recorded", "Payouts", f"₹{payload.amount:.0f} to {payload.merchant_id}", payout["id"])
+    return payout
+
+
+@api.get("/merchant/payouts")
+async def merchant_payouts(user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    earnings = await _merchant_earnings(user["id"])
+    history = public_many(await db.payouts.find({"merchant_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100))
+    return {**earnings, "history": history}
 
 
 app.include_router(api)
