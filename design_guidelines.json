@@ -1,0 +1,154 @@
+{
+  "app_name": "EduNexus Academy & Marketplace",
+  "personality": "1 iOS-Native Clean",
+  "personality_one_liner": "A pristine, calm, and high-trust educational ecosystem pairing iOS-native clarity with warm botanical tones and effortless cross-role navigation.",
+  "color": {
+    "surface": "#FDFCFA",
+    "onSurface": "#1C1C1E",
+    "surfaceSecondary": "#F4F3EE",
+    "onSurfaceSecondary": "#3A3A3C",
+    "surfaceTertiary": "#EAE8E1",
+    "onSurfaceTertiary": "#636366",
+    "surfaceInverse": "#1C1C1E",
+    "onSurfaceInverse": "#FDFCFA",
+    "brand": "#2E5A44",
+    "brandPrimary": "#2E5A44",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#437C60",
+    "onBrandSecondary": "#FFFFFF",
+    "brandTertiary": "#E2ECE6",
+    "onBrandTertiary": "#1B3829",
+    "success": "#2D6A4F",
+    "onSuccess": "#FFFFFF",
+    "warning": "#C86D3F",
+    "onWarning": "#FFFFFF",
+    "error": "#B83B36",
+    "onError": "#FFFFFF",
+    "info": "#3A6073",
+    "onInfo": "#FFFFFF",
+    "border": "#E1DFD6",
+    "borderStrong": "#2E5A44",
+    "divider": "#EFECE4"
+  },
+  "typography": {
+    "displayFontFamily": "PlusJakartaSans",
+    "textFontFamily": "Geist",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous iOS vertical rhythm with structured padding and clear component grouping.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": "1",
+  "navigation": "bottom_tabs",
+  "icon_set": "Ionicons",
+  "glassmorphism": {
+    "enabled": "true",
+    "do's": [
+      "Use frosted glass on sticky navigation bars and search headers",
+      "Apply translucent tinted base over hero cards"
+    ],
+    "dont's": [
+      "Do not blur form fields or dense text areas",
+      "Never stack multiple heavy blur layers"
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "screens": [
+    {
+      "name": "Auth",
+      "purpose": "Mobile OTP authentication with Truecaller-first verification and role selection.",
+      "states": {
+        "loading": "Centered verification spinner with secure token status",
+        "empty": "Phone number entry prompt with country code selector",
+        "error": "Inline OTP error message with resend countdown timer"
+      },
+      "layout": "Clean centered vertical stack with generous whitespace, botanical brand emblem, and prominent OTP input boxes."
+    },
+    {
+      "name": "StudentDiscovery",
+      "purpose": "Explore top-rated institutes, courses, batches, and live scholarship offers.",
+      "states": {
+        "loading": "Shimmer skeleton cards for institute grids and featured courses",
+        "empty": "Empty state illustration with filter reset and search suggestions",
+        "error": "Friendly retry banner with offline cache indicator"
+      },
+      "layout": "Top sticky search header with category pill filters, featured hero banner carousel, and vertical course/institute discovery cards."
+    },
+    {
+      "name": "InstituteDashboard",
+      "purpose": "Merchant and institute hub for managing courses, batches, enrollments, and revenue stats.",
+      "states": {
+        "loading": "Skeleton financial widgets and batch list loaders",
+        "empty": "Onboarding prompt to publish first institute course or batch",
+        "error": "Error retry card for merchant metrics sync"
+      },
+      "layout": "Modular metric cards at top, quick action grid for batch creation, and scrollable list of active enrollments."
+    },
+    {
+      "name": "AdminOversight",
+      "purpose": "System-wide governance, dispute resolution, refund processing, and audit logs.",
+      "states": {
+        "loading": "Activity log skeleton loader and metric counter placeholders",
+        "empty": "All caught up state with zero pending moderation flags",
+        "error": "Server sync error alert with manual refresh trigger"
+      },
+      "layout": "Segmented tab bar for Users, Institutes, Refunds, and Audit Logs with quick-action approval rows."
+    },
+    {
+      "name": "ProfileSettings",
+      "purpose": "Student profile completion, language preferences, favorites, and activity history.",
+      "states": {
+        "loading": "Profile header skeleton with badge placeholders",
+        "empty": "Prompt to complete academic profile for personalized recommendations",
+        "error": "Failed to save profile changes alert"
+      },
+      "layout": "Scrollable form with avatar header, multi-language selector, notification toggles, and saved favorites list."
+    }
+  ],
+  "images": {
+    "hero_banner": {
+      "url": "https://images.unsplash.com/photo-1524178232363-1fb2b075b655?q=80&w=1200&auto=format&fit=crop",
+      "dark": "https://images.unsplash.com/photo-1524178232363-1fb2b075b655?q=80&w=1200&auto=format&fit=crop",
+      "alt": "Modern campus learning hall with natural lighting"
+    },
+    "institute_logo_1": {
+      "url": "https://images.unsplash.com/photo-1562774053-701939374585?q=80&w=400&auto=format&fit=crop",
+      "alt": "Apex Institute of Technology logo mark"
+    },
+    "institute_logo_2": {
+      "url": "https://images.unsplash.com/photo-1523050854058-8df90110c9f1?q=80&w=400&auto=format&fit=crop",
+      "alt": "Global Business Academy logo mark"
+    }
+  },
+  "instructions_to_main_agent": "Ensure all navigation flows preserve exact existing backend endpoints and storage utilities in /app/frontend/src/utils/storage.tsx. Implement bottom tab navigation for students and role-switchers for merchants/admins. Follow iOS-native clean design rules with 0.5pt/1pt borders and botanical color tokens."
+}

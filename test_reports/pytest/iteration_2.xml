@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="2" failures="0" skipped="0" tests="2" time="0.326" timestamp="2026-09-03T10:38:14.010294+00:00" hostname="agent-env-e98fc3ca-3620-4a86-856f-19fb55550f4d"><testcase classname="" name="tests.test_core_flows" time="0.000"><error message="collection failure">backend/tests/test_core_flows.py:9: in &lt;module&gt;
+    BASE_URL = (os.environ.get("EXPO_BACKEND_URL") or os.environ.get("EXPO_PUBLIC_BACKEND_URL")).rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'rstrip'</error><error message="collection failure">backend/tests/test_core_flows.py:9: in &lt;module&gt;
+    BASE_URL = (os.environ.get("EXPO_BACKEND_URL") or os.environ.get("EXPO_PUBLIC_BACKEND_URL")).rstrip("/")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AttributeError: 'NoneType' object has no attribute 'rstrip'</error></testcase></testsuite></testsuites>

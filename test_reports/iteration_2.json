@@ -1,0 +1,42 @@
+{
+  "summary": "Retested backend core flows and mobile web preview at 390x844. Backend regression suite passed 3/3; student OTP/profile, discovery/course detail, and admin protected dashboard passed. Persistent user-visible Unexpected text node warning remains.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "Index root preview / React Native Web",
+        "issue": "Console and visible Expo error overlay/toast still report 'Unexpected text node: . A text node cannot be a child of a <View>.' after restart; this violates the requested no-warning condition.",
+        "priority": "HIGH"
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_core_flows.py",
+    "/app/test_reports/pytest/iteration_2_fixed.xml",
+    "/app/test_reports/screens/iteration_2"
+  ],
+  "action_items": [
+    "Find and remove the empty/raw JSX text node in index.tsx (warning remains despite icon renderer isolation); verify console and visible overlay are clean.",
+    "Retest merchant OTP/dashboard after fixing or improving the mobile modal selector/scroll behavior; this run could not complete because the Institute role selector was outside the 390x844 viewport."
+  ],
+  "critical_code_review_comments": [
+    "Admin and merchant dashboard effects depend on inline onLoad functions, which can retrigger loading on parent rerenders; monitor for request loops.",
+    "Backend JWT fallback warning was not observed as a functional failure in the regression suite, but the server log still reports an insecure key-length warning when configured fallback is used."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (3/3)",
+    "frontend": "80% (student/discovery/course/admin passed; merchant flow not completed; warning failed)"
+  },
+  "seed_data_creation": "No new seed data created; OTP users may persist from prior runs.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Use EXPO_PUBLIC_BACKEND_URL from frontend/.env when running pytest; the backend test file does not load .env automatically. Development OTP and payment flows are MOCKED/provider-independent as documented.",
+  "rca_of_issue": "Reproduced on fresh preview loads at 390x844 and after Expo restart. Browser console, Expo error overlay, and toast all show the warning with source location index.tsx:45:47, but that location is the root conditional return rather than the actual offending child. Replacing the Icon renderer previously did not remove it, so inspect all JSX siblings/conditional whitespace in index.tsx and child components, then retest with console capture."
+}

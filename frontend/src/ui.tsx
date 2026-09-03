@@ -1,0 +1,43 @@
+import { Ionicons } from "@expo/vector-icons";
+import React from "react";
+import { Image, Pressable, StyleSheet, Text, View } from "react-native";
+import type { Course, Institute } from "./api";
+
+export const colors = { bg: "#FDFCFA", ink: "#1C1C1E", muted: "#636366", line: "#E1DFD6", soft: "#F4F3EE", green: "#2E5A44", green2: "#437C60", mint: "#E2ECE6", orange: "#C86D3F", red: "#B83B36", white: "#FFFFFF" };
+export const heroArt = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2MDAiIGhlaWdodD0iMzAwIj48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB4MT0iMSIgeTI9IjEiPjxzdG9wIHN0b3AtY29sb3I9IiMyRTVBNDAiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM0MzdDNjAiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0iNjAwIiBoZWlnaHQ9IjMwMCIgZmlsbD0idXJsKCNnKSIvPjxjaXJjbGUgY3g9IjQ4MCIgY3k9IjcwIiByPSIxMDAiIGZpbGw9IiM2YjliNzkiIG9wYWNpdHk9Ii4zIi8+PGNpcmNsZSBjeD0iNTQwIiBjeT0iMjMwIiByPSIxNDAiIGZpbGw9IiNmZmZmZmYiIG9wYWNpdHk9Ii4xIi8+PC9zdmc+";
+
+export function Icon({ name, size = 20, color = colors.ink }: { name: keyof typeof Ionicons.glyphMap; size?: number; color?: string }) {
+  return <Ionicons name={name} size={size} color={color} />;
+}
+
+export function Button({ label, onPress, secondary = false, small = false, icon }: { label: string; onPress: () => void; secondary?: boolean; small?: boolean; icon?: keyof typeof Ionicons.glyphMap }) {
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.button, secondary && styles.buttonSecondary, small && styles.buttonSmall, pressed && styles.pressed]}>{icon && <Icon name={icon} size={16} color={secondary ? colors.green : colors.white} />}<Text style={[styles.buttonText, secondary && styles.buttonTextSecondary, small && styles.buttonTextSmall]}>{label}</Text></Pressable>;
+}
+
+export function Tag({ children, tone = "green" }: { children: React.ReactNode; tone?: "green" | "orange" | "gray" }) {
+  return <View style={[styles.tag, tone === "orange" && styles.tagOrange, tone === "gray" && styles.tagGray]}><Text style={styles.tagText}>{children}</Text></View>;
+}
+
+export function SectionTitle({ title, action, onAction }: { title: string; action?: string; onAction?: () => void }) {
+  return <View style={styles.sectionTitle}><Text style={styles.h2}>{title}</Text>{action && <Pressable onPress={onAction}><Text style={styles.link}>{action}</Text></Pressable>}</View>;
+}
+
+export function CourseCard({ course, onPress, saved, onSave }: { course: Course; onPress: () => void; saved?: boolean; onSave?: () => void }) {
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.courseCard, pressed && styles.pressed]}><View style={styles.courseImage}><Image source={{ uri: heroArt }} style={StyleSheet.absoluteFill} /><View style={styles.courseIcon}><Icon name={course.category === "Design" ? "color-palette-outline" : course.category === "Business" ? "briefcase-outline" : "analytics-outline"} size={22} color={colors.white} /></View>{onSave && <Pressable onPress={onSave} hitSlop={10} style={styles.save}><Icon name={saved ? "heart" : "heart-outline"} size={20} color={saved ? colors.red : colors.white} /></Pressable>}</View><View style={styles.cardBody}><View style={styles.rowBetween}><Tag>{course.category}</Tag><Text style={styles.rating}><Icon name="star" size={13} color={colors.orange} /> {course.rating}</Text></View><Text style={styles.cardTitle} numberOfLines={2}>{course.title}</Text><Text style={styles.cardMeta}>{course.duration}  ·  {course.mode}</Text><Text style={styles.price}>{course.fees === 0 ? "Free" : `₹${course.fees.toLocaleString("en-IN")}`}</Text></View></Pressable>;
+}
+
+export function InstituteCard({ institute, onPress }: { institute: Institute; onPress: () => void }) {
+  return <Pressable onPress={onPress} style={({ pressed }) => [styles.instituteCard, pressed && styles.pressed]}><View style={styles.logo}><Text style={styles.logoText}>{institute.name.charAt(0)}</Text></View><View style={{ flex: 1 }}><Text style={styles.cardTitle} numberOfLines={1}>{institute.name}</Text><Text style={styles.cardMeta}>{institute.city}  ·  {institute.accreditation}</Text><Text style={styles.rating}><Icon name="star" size={13} color={colors.orange} /> {institute.rating}  <Text style={styles.muted}>{institute.students} learners</Text></Text></View><Icon name="chevron-forward" size={18} color={colors.muted} /></Pressable>;
+}
+
+export function Metric({ label, value, icon, tone = "green" }: { label: string; value: string | number; icon: keyof typeof Ionicons.glyphMap; tone?: "green" | "orange" }) {
+  return <View style={styles.metric}><View style={[styles.metricIcon, tone === "orange" && { backgroundColor: "#F9E7DD" }]}><Icon name={icon} size={19} color={tone === "orange" ? colors.orange : colors.green} /></View><Text style={styles.metricValue}>{value}</Text><Text style={styles.metricLabel}>{label}</Text></View>;
+}
+
+export function EmptyState({ icon, title, body }: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string }) {
+  return <View style={styles.empty}><Icon name={icon} size={34} color={colors.green2} /><Text style={styles.emptyTitle}>{title}</Text><Text style={styles.emptyBody}>{body}</Text></View>;
+}
+
+export const styles = StyleSheet.create({
+  button: { minHeight: 46, paddingHorizontal: 18, borderRadius: 14, backgroundColor: colors.green, alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 }, buttonSecondary: { backgroundColor: colors.mint }, buttonSmall: { minHeight: 38, paddingHorizontal: 14, borderRadius: 11 }, buttonText: { color: colors.white, fontSize: 14, fontWeight: "700" }, buttonTextSecondary: { color: colors.green }, buttonTextSmall: { fontSize: 13 }, pressed: { opacity: 0.72, transform: [{ scale: 0.98 }] }, tag: { alignSelf: "flex-start", backgroundColor: colors.mint, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5 }, tagOrange: { backgroundColor: "#F9E7DD" }, tagGray: { backgroundColor: colors.soft }, tagText: { color: colors.green, fontSize: 11, fontWeight: "700" }, sectionTitle: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }, h2: { color: colors.ink, fontSize: 20, fontWeight: "800", letterSpacing: -0.3 }, link: { color: colors.green, fontWeight: "700", fontSize: 13 }, courseCard: { width: 238, backgroundColor: colors.white, borderRadius: 18, borderWidth: 1, borderColor: colors.line, overflow: "hidden", marginRight: 12 }, courseImage: { height: 126, backgroundColor: colors.green, position: "relative", overflow: "hidden" }, courseIcon: { position: "absolute", left: 16, bottom: 16, width: 42, height: 42, borderRadius: 13, backgroundColor: "#ffffff2b", alignItems: "center", justifyContent: "center" }, save: { position: "absolute", right: 12, top: 12, width: 38, height: 38, borderRadius: 20, backgroundColor: "#18372799", alignItems: "center", justifyContent: "center" }, cardBody: { padding: 14 }, rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, cardTitle: { color: colors.ink, fontSize: 15, fontWeight: "800", marginTop: 10, lineHeight: 20 }, cardMeta: { color: colors.muted, fontSize: 12, marginTop: 7 }, rating: { color: colors.ink, fontSize: 12, fontWeight: "700" }, muted: { color: colors.muted, fontWeight: "400" }, price: { color: colors.green, fontSize: 16, fontWeight: "800", marginTop: 12 }, instituteCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line, marginBottom: 10 }, logo: { width: 48, height: 48, borderRadius: 15, backgroundColor: colors.mint, alignItems: "center", justifyContent: "center" }, logoText: { color: colors.green, fontSize: 21, fontWeight: "800" }, metric: { flex: 1, minWidth: 92, padding: 12, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line }, metricIcon: { width: 34, height: 34, backgroundColor: colors.mint, borderRadius: 11, alignItems: "center", justifyContent: "center", marginBottom: 10 }, metricValue: { color: colors.ink, fontSize: 20, fontWeight: "800" }, metricLabel: { color: colors.muted, fontSize: 11, marginTop: 3 }, empty: { alignItems: "center", padding: 34, backgroundColor: colors.soft, borderRadius: 18, marginTop: 8 }, emptyTitle: { color: colors.ink, fontSize: 17, fontWeight: "800", marginTop: 12 }, emptyBody: { color: colors.muted, textAlign: "center", lineHeight: 20, marginTop: 7, maxWidth: 260 }
+});
