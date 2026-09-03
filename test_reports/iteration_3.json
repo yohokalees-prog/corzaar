@@ -1,0 +1,44 @@
+{
+  "summary": "Backend-only regression + feature testing for iteration 3 (Stripe payments, coupons, courses approval, batches, ratings, refunds, admin insights). 33/33 pytest cases passed. Real Stripe hosted checkout session created (URL confirmed to start with https://checkout.stripe.com/), status polling returns pending and is idempotent, free courses auto-enroll active/paid, merchant coupons start pending and are rejected on validate until admin approves, duplicate coupon codes are rejected, merchant courses start under_review and are excluded from /api/courses until admin publishes, coupon discount correctly applied on enrollment (original_amount/discount/amount fields), merchant batches accept meet_link/dates/capacity, attendance mark and list work, ratings 403 for non-enrolled and 200 for enrolled with course rating recalculated, refunds rejected for unpaid, created for paid, admin lists+approves refund and enrollment flips to refunded/refunded, admin audit logs contain approval entries, admin dashboard exposes pending_courses/pending_coupons/pending_refunds. All legacy endpoints (/api/home, /api/courses, /api/courses/{id}, /api/me, /api/me/lists, /api/me/cart, /api/me/favorites, /api/auth/send-otp, admin login/verify) continue to work.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "GET /api/admin/dashboard", "issue": "Revenue divides succeeded payment totals by 100 assuming paise, but /api/payments/checkout submits `amount=float(enrollment.amount)` in rupees to Stripe (not paise). If Stripe stores amount_total in paise, dashboard revenue is correct; but the create_checkout amount value may be interpreted as rupees by the emergentintegrations adapter — verify what the adapter treats currency INR amount as (unit vs minor units) to avoid a 100x revenue mismatch."},
+      {"endpoint": "POST /api/payments/checkout", "issue": "APP_PAYMENT_RETURN_URL is used as the base for both success and cancel URLs, but the value in backend/.env already includes '/api/payments/return' — the resulting URLs are fine, but if an operator sets APP_PAYMENT_RETURN_URL to a plain origin, the fallback path is only used when APP_PAYMENT_RETURN_URL is unset. Non-blocking."},
+      {"endpoint": "POST /api/coupons/validate", "issue": "Coupon merchant_id must match course.merchant_id, but seed courses have merchant_id=None — merchant-created coupons cannot be applied to any seeded course. Documented behavior in tests; may be intentional but worth confirming."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3_features.py",
+    "/app/backend/tests/test_core_flows.py",
+    "/app/test_reports/pytest/iteration_3.xml"
+  ],
+  "action_items": [
+    "Confirm the emergentintegrations Stripe adapter treats `amount` for INR as rupees (float) vs minor units. Current /api/payments/checkout sends amount=14999.0 for course-product; if the adapter expects paise, adjust to *100; if it expects rupees, /api/admin/dashboard revenue should NOT divide by 100.",
+    "Consider allowing admin-created global coupons (merchant_id=None) so they can apply to seed courses, or update seed courses to belong to a specific admin/merchant_id.",
+    "Optional: expose GET /api/merchant/coupons response `course_id` label to help merchants see which course a pending coupon targets."
+  ],
+  "critical_code_review_comments": [
+    "server.py lines 26-27: STRIPE_API_KEY reads STRIPE_API_KEY OR STRIPE_SECRET_KEY; backend/.env exposes only STRIPE_SECRET_KEY. Works, but the review request explicitly says STRIPE_API_KEY should be in env — cosmetic alignment suggested.",
+    "server.py line 686-694: admin dashboard revenue divides by 100 (paise). Ensure the create_checkout amount unit matches (see minor issue above).",
+    "server.py line 534: fallback upsert on duplicate rating uses `str` key with ternary operator inside a dict literal — works but is unusual; consider explicit branch for readability.",
+    "server.py line 705: institute_status endpoint takes `user` dependency but does not use variable — fine, but consistent with other admin endpoints.",
+    "Seed data creates unique index on (target_type, target_id, author_id) for reviews via db.reviews.create_index — good; ensures idempotent rating semantics."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3_features.py (new)",
+    "/app/test_reports/pytest/iteration_3.xml (new)"
+  ],
+  "success_rate": {"backend": "100% (33/33)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Created ephemeral TEST_ prefixed data: merchant course (TEST_MerchantCourse), coupon codes (TEST*/MC* prefixes), batch with Google Meet link, several student enrollments and one approved refund. All isolated via unique UUID-based mobile numbers.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `EXPO_BACKEND_URL=https://readme-deploy-4.preview.emergentagent.com pytest /app/backend/tests/test_iteration3_features.py -v`. Stripe checkout requires network access to Stripe; if session creation ever returns 502, check backend logs for 'Stripe checkout failed'. The Stripe test key is sk_test_emergent (Emergent-managed). Do NOT try to complete real card payments — verify only that checkout_url begins with https://checkout.stripe.com/ and that /api/payments/status returns pending (or eventually succeeded after webhook).",
+  "rca_of_issue": "No unresolved issues. All 16 declared feature bullets in the review request are covered and passing: Stripe checkout creates a real hosted session; status polling returns pending and idempotent; enrollment with coupon applies discount server-side; free course auto-enrolls active/paid; coupon validate rejects non-approved and accepts approved; merchant coupon creation is pending and duplicates rejected; admin approves coupons; merchant courses start under_review and are excluded from public listing; admin publishes courses to make them visible in /api/courses; batches accept meet_link+dates+capacity; batch attendance POST/GET work; ratings 403 for non-enrolled and rating recalculates course rating/reviews_count; refunds only for paid enrollments; admin lists and approves refunds and enrollments flip to refunded; admin audit-logs contains approve entries; admin dashboard exposes pending_* counters; all regression endpoints intact."
+}

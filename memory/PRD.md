@@ -1,61 +1,75 @@
 # CORZAAR (IMS) — Product Requirements
 
 ## Problem statement
-Build the CORZAAR Institute Management System exactly per the README functional spec:
-students discover courses, merchants/institutes manage listings, admin governs the marketplace.
-Preserve architecture and role flows; add missing login/signup and admin where necessary.
+Build the CORZAAR Institute Management System per the README functional spec — a marketplace where students discover and buy courses, merchants/institutes list and sell them, and admins govern the platform end-to-end.
 
 ## User personas
-- **Student**: discovers and enrolls in courses, saves favorites, tracks learning, pays fees.
-- **Merchant / Institute**: manages courses, batches, students, payments; onboards through review.
-- **Admin**: oversees institutes (approve/reject), audits marketplace, monitors metrics.
+- **Student**: discovers, enrolls, pays (Stripe), rates, requests refunds
+- **Merchant / Institute**: lists courses, creates batches (with Zoom/Meet links) and coupons, tracks attendance and revenue
+- **Admin**: approves institutes, courses and coupons, handles refunds, audits all activity
 
-## Roles & auth flows
-- **Student & Merchant**: Mobile number → SMS OTP verification (dev code `123456`).
-- **Admin**: Email + password + secondary OTP verification (dev code `123456`).
-- JWT (`sub` + `role`) signed by backend; token stored via `@/src/utils/storage` secure API.
+## Auth flows
+- Student & Merchant → mobile OTP (dev code `123456`)
+- Admin → email + password + OTP (dev code `123456`)
+- JWT (`sub` + `role`) stored via `@/src/utils/storage`
 
-## Core requirements (implemented)
-### Student
-- Home hero, categories, top courses, trusted institutes, quick offers/placements
-- Discover: search, category filter, results grid
-- Course detail: institute link, curriculum, reviews, payment gateway simulation
-- Institute detail: about, courses, student voices
-- Cart / Favorites (persistent per account)
-- Profile: edit name/email, view enrollments, sign out
-- Offers, Placements, Notifications, bottom tab navigation
+## Core features
+### Marketplace
+- Home hero, category chips, top courses, trusted institutes
+- Discover with search + category filter
+- Course detail with curriculum, batches, ratings, reviews, coupon input
+- Institute detail with rating, courses, student voices
+- Cart / Favorites persistent per student
 
-### Merchant / Institute
-- Onboarding via OTP → merchant portal
-- Overview metrics (active courses, enrollments)
-- Course create form (title, description, fees) → submitted for admin review
-- Tabbed workspace: Overview / Courses / Batches / Payments
+### Payments (Stripe)
+- Real Stripe hosted checkout via Emergent `emergentintegrations` adapter (INR)
+- Coupon applied server-side; final amount charged after discount
+- Webhook + polling reconciliation → enrollment marked active with receipt
 
-### Admin
-- Metrics: students, active institutes, active courses
-- Institute approval workflow (approve/reject pending, tag statuses)
-- Tabs: Institutes / Students / Refunds / Audit logs
+### Ratings
+- Only students with active enrollments can rate a course or its institute
+- Ratings recalculated on every submit; unique per (target, student)
+
+### Coupons
+- Merchant creates code → status `pending`
+- Admin approves → status `approved`; students can then apply
+- Coupons appear on `/api/offers` after approval
+
+### Course listing approval
+- Merchant-created courses start `under_review`
+- Admin approves (`published`) or rejects — only published courses appear in discovery
+
+### Batches
+- Merchant creates batches per course: schedule, dates, seats, coordinator, Zoom/Meet URL
+- Attendance mark (present/absent) per learner per batch
+- Live class link opens in browser
+
+### Admin Insights
+- Metrics: students, institutes, courses, pending items, revenue
+- Tabs: Institutes, Courses, Coupons, Refunds, Audit
+- Refunds: students request → admin approves/rejects; approved refund marks enrollment `refunded`
+- Audit logs: every state change (institute/course/coupon/refund + batch/course create) is logged with actor and timestamp
 
 ## Architecture
-- **Backend**: FastAPI + Motor (async MongoDB), PyJWT auth.
-  Routes under `/api`: `/home`, `/courses`, `/auth/*`, `/me/*`, `/enrollments`,
-  `/payments/confirm`, `/offers`, `/placements`, `/merchant/*`, `/admin/*`.
-- **Database**: MongoDB collections — users, courses, institutes, enrollments,
-  offers, placements, notifications, otps.
-- **Frontend**: Expo Router (single index route), React Native components only,
-  role-based conditional rendering, unified auth modal, safe-area aware tabs.
-- **Storage**: `@/src/utils/storage` for JWT and session persistence.
+- **Backend**: FastAPI + Motor (async MongoDB), PyJWT auth, Emergent Stripe adapter
+- **Frontend**: Expo Router (mobile-first, RN Web supported), single index route + role-based screens, `expo-web-browser` for Stripe checkout
+- **Storage**: `@/src/utils/storage` for tokens
+- **Design**: botanical palette (deep green + terracotta), Ionicons, 8pt grid, StyleSheet only
 
-## Design system
-- Botanical palette (deep green, mint, cream, terracotta accent), Ionicons.
-- 8pt spacing, StyleSheet only, mobile-first, 44pt touch targets.
+## Key API endpoints (all `/api` prefixed)
+Auth: `POST /auth/send-otp`, `/auth/verify-otp`, `/auth/admin-login`, `/auth/admin-verify`
+Discovery: `GET /home`, `/courses`, `/courses/{id}`, `/institutes/{id}`
+Student: `POST /enrollments`, `POST /payments/checkout`, `GET /payments/status/{sid}`, `POST /reviews`, `POST /refunds`, `POST /coupons/validate`
+Merchant: `GET/POST /merchant/courses`, `/merchant/batches`, `/merchant/coupons`, `/merchant/batches/{id}/attendance`
+Admin: `GET /admin/dashboard`, `/admin/institutes|courses|coupons|refunds|audit-logs`, `POST /admin/{resource}/{id}/status`
+Webhook: `POST /webhooks/stripe`
 
 ## Test credentials
-See `/app/memory/test_credentials.md`.
+See `/app/memory/test_credentials.md`. Uses Emergent-managed Stripe test key — no setup needed.
 
-## Backlog (post-MVP)
-- Real SMS/email provider integration (currently dev-adapter with fixed OTP).
-- Merchant batches & attendance UI beyond overview placeholder.
-- Admin refunds, audit logs, and student management deep views.
-- Payment gateway (Razorpay/Stripe) replacing the confirm-success simulation.
-- Push notifications for enrollment updates (opt-in on native build).
+## Backlog
+- Real SMS/email provider (dev-adapter today)
+- Native Stripe PaymentSheet path (requires publishable key)
+- Batch scheduler with per-session attendance dates
+- Certificate generation on course completion
+- Instructor payout via Stripe Connect

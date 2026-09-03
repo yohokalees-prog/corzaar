@@ -22,6 +22,12 @@ export const post = <T,>(path: string, body: unknown, token?: string) => request
 export const put = <T,>(path: string, body: unknown, token?: string) => request<T>(path, { method: "PUT", body: JSON.stringify(body) }, token);
 export const remove = <T,>(path: string, token?: string) => request<T>(path, { method: "DELETE" }, token);
 
-export type Course = { id: string; title: string; category: string; duration: string; fees: number; rating: number; students: number; mode: string; description: string; image_key: string; institute_id: string };
+export type Course = { id: string; title: string; category: string; duration: string; fees: number; rating: number; students: number; mode: string; description: string; image_key: string; institute_id: string; status?: string; curriculum?: string[]; reviews_count?: number };
 export type Institute = { id: string; name: string; city: string; rating: number; accreditation: string; students: string; description: string; image_key: string; status: string };
 export type User = { id: string; role: "student" | "merchant" | "admin"; full_name?: string; mobile?: string; email?: string; profile_complete?: boolean };
+export type Review = { id: string; rating: number; text: string; name: string; created_at: string };
+export type Batch = { id: string; course_id: string; course_title?: string; schedule: string; capacity: number; enrolled: number; coordinator: string; start_date: string; end_date: string; meet_link?: string; status: string };
+export type Coupon = { id: string; code: string; description?: string; discount_percent: number; course_id?: string | null; merchant_id?: string; status: string; title?: string; subtitle?: string };
+export type Enrollment = { id: string; course_id: string; status: string; payment_status?: string; amount?: number; discount?: number; coupon_code?: string | null; receipt?: string; course?: Course };
+export type Refund = { id: string; enrollment_id: string; course_title?: string; amount?: number; reason: string; status: string; student_name?: string; created_at: string };
+export type AuditLog = { id: string; action: string; module: string; role: string; actor_name?: string; detail?: string; created_at: string };
