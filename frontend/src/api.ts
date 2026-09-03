@@ -35,3 +35,6 @@ export type AuditLog = { id: string; action: string; module: string; role: strin
 export type Referral = { code: string; reward_per_referral: number; discount_percent: number; wallet_balance: number; count: number; friends: { amount: number; created_at: string; friend_name: string }[] };
 export type PayoutHistory = { id: string; merchant_id: string; amount: number; method: string; reference?: string; notes?: string; status: string; created_at: string };
 export type PayoutLedger = { merchant_id: string; merchant_name: string; institute?: any; gross: number; paid_out: number; pending: number };
+export type Cashout = { id: string; student_id?: string; student_name?: string; amount: number; upi_id: string; status: string; reference?: string; created_at: string };
+export type Insights = { rating_trend: { week: string; average: number; count: number }[]; top_courses: { id: string; title: string; rating: number; reviews_count: number; students: number }[]; curriculum_dropoff: { id: string; title: string; enrolled: number; items: { item: string; completed: number; pct: number }[] }[] };
+export type ShareLinks = { certificate_url: string; pdf_url: string; linkedin: string; twitter: string; whatsapp: string; title: string };

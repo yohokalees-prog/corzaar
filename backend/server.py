@@ -7,14 +7,19 @@ import os
 import secrets
 import uuid
 
+import io
 import jwt
 from dotenv import load_dotenv
 from emergentintegrations.payments.stripe.checkout import CheckoutSessionRequest, StripeCheckout
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
+from reportlab.lib.colors import HexColor
+from reportlab.lib.pagesizes import landscape, A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -247,6 +252,18 @@ class PayoutRecord(BaseModel):
     method: str = "bank_transfer"
     reference: str = ""
     notes: str = ""
+
+
+class CashoutRequest(BaseModel):
+    upi_id: str
+    amount: float
+
+
+class CashoutAction(BaseModel):
+    reference: str = ""
+
+
+MIN_CASHOUT = 500  # rupees
 
 
 # ---------- Seed ----------
@@ -634,7 +651,9 @@ async def create_review(payload: ReviewCreate, user: Dict[str, Any] = Depends(re
 @api.get("/me/notifications")
 async def notifications(user: Dict[str, Any] = Depends(current_user)) -> List[Dict[str, Any]]:
     rows = public_many(await db.notifications.find({"$or": [{"user_id": user["id"]}, {"user_id": "all"}]}, {"_id": 0}).sort("created_at", -1).to_list(20))
-    return rows or [{"id": "welcome", "title": "Welcome to CORZAAR", "body": "Complete your profile to unlock better recommendations.", "kind": "info", "created_at": now(), "read": False}]
+    reminders = await _session_reminders(user["id"]) if user.get("role") == "student" else []
+    combined = reminders + rows
+    return combined or [{"id": "welcome", "title": "Welcome to CORZAAR", "body": "Complete your profile to unlock better recommendations.", "kind": "info", "created_at": now(), "read": False}]
 
 
 @api.get("/offers")
@@ -1029,6 +1048,231 @@ async def merchant_payouts(user: Dict[str, Any] = Depends(require_roles("merchan
     earnings = await _merchant_earnings(user["id"])
     history = public_many(await db.payouts.find({"merchant_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100))
     return {**earnings, "history": history}
+
+
+# ---------- Certificate PDF + share ----------
+def _render_certificate_pdf(name: str, course_title: str, institute_name: str, cert_id: str, issued_at: str) -> bytes:
+    buf = io.BytesIO()
+    page = landscape(A4)
+    c = canvas.Canvas(buf, pagesize=page)
+    w, h = page
+    # Background
+    c.setFillColor(HexColor("#F7F9FC"))
+    c.rect(0, 0, w, h, fill=1, stroke=0)
+    # Inner card
+    margin = 22 * mm
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.roundRect(margin, margin, w - 2 * margin, h - 2 * margin, 12, fill=1, stroke=0)
+    # Border
+    c.setStrokeColor(HexColor("#1E3A5F"))
+    c.setLineWidth(1.4)
+    c.roundRect(margin + 8, margin + 8, w - 2 * margin - 16, h - 2 * margin - 16, 8, fill=0, stroke=1)
+    # Brand
+    c.setFillColor(HexColor("#3B5F84"))
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(w / 2, h - margin - 22, "CORZAAR  ·  CERTIFICATE OF COMPLETION")
+    # Title
+    c.setFillColor(HexColor("#1E3A5F"))
+    c.setFont("Helvetica-Bold", 34)
+    c.drawCentredString(w / 2, h - margin - 66, "Certificate of Completion")
+    # Lead
+    c.setFillColor(HexColor("#64748B"))
+    c.setFont("Helvetica", 12)
+    c.drawCentredString(w / 2, h - margin - 92, "This is to certify that")
+    # Name
+    c.setFillColor(HexColor("#0F1E33"))
+    c.setFont("Helvetica-Bold", 28)
+    c.drawCentredString(w / 2, h - margin - 128, name)
+    # Lead
+    c.setFillColor(HexColor("#64748B"))
+    c.setFont("Helvetica", 12)
+    c.drawCentredString(w / 2, h - margin - 152, "has successfully completed")
+    # Course
+    c.setFillColor(HexColor("#1E3A5F"))
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(w / 2, h - margin - 178, course_title)
+    # Meta
+    c.setFillColor(HexColor("#64748B"))
+    c.setFont("Helvetica", 10)
+    c.drawCentredString(w / 2, h - margin - 202, f"Awarded by {institute_name}  ·  {issued_at}")
+    # Footer row
+    footer_y = margin + 34
+    for i, (label, value) in enumerate([("CERTIFICATE ID", cert_id), ("ISSUED", issued_at), ("INSTITUTE", institute_name)]):
+        x = margin + 40 + i * ((w - 2 * margin - 80) / 3)
+        c.setFillColor(HexColor("#64748B"))
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(x, footer_y + 14, label)
+        c.setFillColor(HexColor("#0F1E33"))
+        c.setFont("Helvetica", 11)
+        c.drawString(x, footer_y, value)
+    # Seal
+    c.setFillColor(HexColor("#0EA5A0"))
+    c.circle(w - margin - 48, margin + 60, 30, fill=1, stroke=0)
+    c.setFillColor(HexColor("#FFFFFF"))
+    c.setFont("Helvetica-Bold", 8)
+    c.drawCentredString(w - margin - 48, margin + 66, "CORZAAR")
+    c.drawCentredString(w - margin - 48, margin + 56, "VERIFIED")
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+async def _cert_auth(authorization: Optional[str], auth: Optional[str]) -> Dict[str, Any]:
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+    elif auth:
+        token = auth
+    if not token:
+        raise HTTPException(401, "Authentication required")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.PyJWTError as exc:
+        raise HTTPException(401, "Invalid session") from exc
+    user = await db.users.find_one({"id": payload.get("sub"), "role": "student"}, {"_id": 0})
+    if not user:
+        raise HTTPException(401, "User not found")
+    return user
+
+
+@api.get("/me/enrollments/{enrollment_id}/certificate.pdf")
+async def certificate_pdf(enrollment_id: str, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> StreamingResponse:
+    user = await _cert_auth(authorization, auth)
+    enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
+    if not enrollment or not enrollment.get("certificate_id"):
+        raise HTTPException(404, "Certificate not available yet")
+    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
+    institute = await db.institutes.find_one({"id": course.get("institute_id")}, {"_id": 0}) or {}
+    pdf = _render_certificate_pdf(user.get("full_name") or "CORZAAR learner", course.get("title", "CORZAAR course"), institute.get("name", "CORZAAR"), enrollment["certificate_id"], (enrollment.get("completed_at", "")[:10]) or datetime.now(timezone.utc).date().isoformat())
+    filename = f"CORZAAR-{enrollment['certificate_id']}.pdf"
+    return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@api.get("/me/enrollments/{enrollment_id}/share")
+async def certificate_share(enrollment_id: str, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, str]:
+    enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
+    if not enrollment or not enrollment.get("certificate_id"):
+        raise HTTPException(404, "Certificate not available yet")
+    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
+    base = (APP_PAYMENT_RETURN_URL or "https://corzaar.app").split("/api/")[0].rstrip("/")
+    cert_url = f"{base}/api/me/enrollments/{enrollment_id}/certificate"
+    from urllib.parse import quote_plus
+    title = f"I completed {course.get('title', 'a CORZAAR course')}"
+    linkedin = f"https://www.linkedin.com/sharing/share-offsite/?url={quote_plus(cert_url)}"
+    twitter = f"https://twitter.com/intent/tweet?text={quote_plus(title + ' on CORZAAR')}&url={quote_plus(cert_url)}"
+    whatsapp = f"https://wa.me/?text={quote_plus(title + ' — ' + cert_url)}"
+    return {"certificate_url": cert_url, "pdf_url": f"{cert_url}.pdf", "linkedin": linkedin, "twitter": twitter, "whatsapp": whatsapp, "title": title}
+
+
+# ---------- Merchant Insights ----------
+@api.get("/merchant/insights")
+async def merchant_insights(user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    my_courses = await db.courses.find({"merchant_id": user["id"]}, {"_id": 0}).to_list(200)
+    course_ids = [c["id"] for c in my_courses]
+    all_reviews = await db.reviews.find({"target_type": "courses", "course_id": {"$in": course_ids}}, {"_id": 0}).sort("created_at", 1).to_list(2000)
+    # Rating trend — bucket by week
+    from collections import defaultdict
+    buckets: Dict[str, List[int]] = defaultdict(list)
+    for r in all_reviews:
+        try:
+            when = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")).date()
+            week_start = (when - __import__("datetime").timedelta(days=when.weekday())).isoformat()
+            buckets[week_start].append(int(r.get("rating") or 0))
+        except (KeyError, ValueError):
+            continue
+    trend = [{"week": wk, "average": round(sum(vals) / len(vals), 2), "count": len(vals)} for wk, vals in sorted(buckets.items())]
+    # Top courses by rating × log(reviews_count)
+    import math
+    ranked = sorted(my_courses, key=lambda c: (float(c.get("rating") or 0)) * math.log1p(int(c.get("reviews_count") or 0)), reverse=True)
+    top = [{"id": c["id"], "title": c["title"], "rating": c.get("rating", 0), "reviews_count": c.get("reviews_count", 0), "students": c.get("students", 0)} for c in ranked[:5]]
+    # Curriculum drop-off per course
+    dropoff: List[Dict[str, Any]] = []
+    for c in my_courses:
+        if not c.get("curriculum"):
+            continue
+        enrolls = await db.enrollments.find({"course_id": c["id"], "status": "active"}, {"_id": 0, "completed_items": 1}).to_list(1000)
+        if not enrolls:
+            continue
+        total = len(enrolls)
+        per_item = []
+        for item in c["curriculum"]:
+            completed = sum(1 for e in enrolls if item in (e.get("completed_items") or []))
+            per_item.append({"item": item, "completed": completed, "pct": round(completed * 100 / total, 1)})
+        dropoff.append({"id": c["id"], "title": c["title"], "enrolled": total, "items": per_item})
+    return {"rating_trend": trend, "top_courses": top, "curriculum_dropoff": dropoff}
+
+
+# ---------- Wallet Cashout ----------
+@api.post("/me/cashouts")
+async def request_cashout(payload: CashoutRequest, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, Any]:
+    balance = float(user.get("wallet_balance") or 0)
+    if payload.amount > balance:
+        raise HTTPException(400, "Amount exceeds wallet balance")
+    if payload.amount < MIN_CASHOUT:
+        raise HTTPException(400, f"Minimum cashout is ₹{MIN_CASHOUT}")
+    upi = payload.upi_id.strip()
+    if "@" not in upi or len(upi) < 5:
+        raise HTTPException(400, "Enter a valid UPI ID (e.g. name@upi)")
+    # Lock the amount immediately
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"wallet_balance": -payload.amount}})
+    cashout = {"id": str(uuid.uuid4()), "student_id": user["id"], "student_name": user.get("full_name"), "amount": payload.amount, "upi_id": upi, "status": "pending", "reference": "", "created_at": now()}
+    await db.cashouts.insert_one(cashout.copy())
+    await audit(user, "Cashout requested", "Cashouts", f"₹{payload.amount:.0f} to {upi}", cashout["id"])
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "title": "Cashout requested", "body": f"₹{payload.amount:.0f} to {upi} is under review.", "kind": "cashout", "created_at": now(), "read": False})
+    return cashout
+
+
+@api.get("/me/cashouts")
+async def my_cashouts(user: Dict[str, Any] = Depends(require_roles("student"))) -> List[Dict[str, Any]]:
+    return public_many(await db.cashouts.find({"student_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100))
+
+
+@api.get("/admin/cashouts")
+async def admin_cashouts(user: Dict[str, Any] = Depends(require_roles("admin"))) -> List[Dict[str, Any]]:
+    return public_many(await db.cashouts.find({}, {"_id": 0}).sort("created_at", -1).to_list(200))
+
+
+@api.post("/admin/cashouts/{cashout_id}/action")
+async def cashout_action(cashout_id: str, payload: CashoutAction, status: str = Query(..., pattern="^(approved|rejected|paid)$"), user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    cashout = await db.cashouts.find_one({"id": cashout_id}, {"_id": 0})
+    if not cashout:
+        raise HTTPException(404, "Cashout not found")
+    if cashout["status"] in ("paid", "rejected"):
+        raise HTTPException(400, "Cashout already resolved")
+    updates: Dict[str, Any] = {"status": status, "resolved_at": now(), "resolved_by": user["id"], "reference": payload.reference}
+    if status == "rejected":
+        # refund the locked amount to student wallet
+        await db.users.update_one({"id": cashout["student_id"]}, {"$inc": {"wallet_balance": float(cashout["amount"])}})
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cashout["student_id"], "title": "Cashout rejected", "body": f"₹{cashout['amount']:.0f} has been returned to your wallet.", "kind": "cashout", "created_at": now(), "read": False})
+    elif status == "approved":
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cashout["student_id"], "title": "Cashout approved", "body": f"₹{cashout['amount']:.0f} approved — payout in progress to {cashout['upi_id']}.", "kind": "cashout", "created_at": now(), "read": False})
+    elif status == "paid":
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cashout["student_id"], "title": "Cashout paid", "body": f"₹{cashout['amount']:.0f} sent to {cashout['upi_id']}.", "kind": "cashout", "created_at": now(), "read": False})
+    await db.cashouts.update_one({"id": cashout_id}, {"$set": updates})
+    await audit(user, f"Cashout {status}", "Cashouts", f"₹{cashout['amount']:.0f}", cashout_id)
+    return {"id": cashout_id, "status": status}
+
+
+# ---------- Session reminders (computed on demand) ----------
+async def _session_reminders(user_id: str) -> List[Dict[str, Any]]:
+    """Return notifications for sessions in the next ~24 hours for enrolled students."""
+    from datetime import date as _date, timedelta
+    today = _date.today()
+    tomorrow = today + timedelta(days=1)
+    enrolls = await db.enrollments.find({"student_id": user_id, "status": "active"}, {"_id": 0, "course_id": 1}).to_list(200)
+    course_ids = [e["course_id"] for e in enrolls]
+    if not course_ids:
+        return []
+    batches = await db.batches.find({"course_id": {"$in": course_ids}, "status": "active"}, {"_id": 0}).to_list(200)
+    reminders: List[Dict[str, Any]] = []
+    for b in batches:
+        for sess in b.get("sessions") or []:
+            sess_date = sess.get("date", "")
+            if sess_date == today.isoformat():
+                reminders.append({"id": f"rem-{sess.get('id')}-today", "title": "Class today", "body": f"{b.get('course_title', 'Your course')} · {sess_date}" + (f" · {b.get('meet_link')}" if b.get("meet_link") else ""), "kind": "reminder", "created_at": now(), "read": False, "link": b.get("meet_link")})
+            elif sess_date == tomorrow.isoformat():
+                reminders.append({"id": f"rem-{sess.get('id')}-tomorrow", "title": "Class tomorrow", "body": f"{b.get('course_title', 'Your course')} · {sess_date}", "kind": "reminder", "created_at": now(), "read": False, "link": b.get("meet_link")})
+    return reminders
 
 
 app.include_router(api)
