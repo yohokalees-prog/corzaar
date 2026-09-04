@@ -10,7 +10,7 @@ import requests
 BASE_URL = (
     os.environ.get("EXPO_BACKEND_URL")
     or os.environ.get("EXPO_PUBLIC_BACKEND_URL")
-    or "https://readme-deploy-4.preview.emergentagent.com"
+    or "https://corzaar-staging.preview.emergentagent.com"
 ).rstrip("/")
 
 

@@ -37,6 +37,6 @@
   "seed_data_creation": "Created transient student and merchant test users and a student enrollment through the API.",
   "retest_needed": true,
   "should_call_test_agent_after_fix": true,
-  "context_for_next_testing_agent": "Preview URL tested: https://readme-deploy-4.preview.emergentagent.com at 375x667. Student phone 9876543210 and OTP 123456 reached profile. Admin credentials were read from test_credentials.md.",
+  "context_for_next_testing_agent": "Preview URL tested: https://corzaar-staging.preview.emergentagent.com at 375x667. Student phone 9876543210 and OTP 123456 reached profile. Admin credentials were read from test_credentials.md.",
   "rca_of_issue": "After successful student OTP verification, the profile screen displayed a red toast containing 'Unexpected text node: .'. Expo console reproduced the warning with Index as the component location. The exact descendant was not isolated, but this is a real React Native Web host-tree violation rather than an API failure."
 }

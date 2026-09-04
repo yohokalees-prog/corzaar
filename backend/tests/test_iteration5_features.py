@@ -10,7 +10,7 @@ import pytest
 import requests
 
 BASE_URL = (os.environ.get("EXPO_BACKEND_URL")
-            or "https://readme-deploy-4.preview.emergentagent.com").rstrip("/")
+            or "https://corzaar-staging.preview.emergentagent.com").rstrip("/")
 
 
 # ---------- Helpers ----------
