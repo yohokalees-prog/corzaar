@@ -3,14 +3,17 @@
 CORZAAR IMS Backend Test Suite
 Tests all backend APIs including new certificate management features
 """
+import os
 import requests
 import json
 import re
 import time
 from typing import Dict, Any, Optional
 
-# Base URL from frontend .env
-BASE_URL = "https://corzaar-staging.preview.emergentagent.com/api"
+# Base URL from frontend .env or local server
+BASE_URL = os.environ.get("API_BASE_URL") or os.environ.get("EXPO_BACKEND_URL", "http://localhost:8000/api").rstrip("/")
+if not BASE_URL.endswith("/api"):
+    BASE_URL = f"{BASE_URL}/api"
 
 # Test credentials from /app/memory/test_credentials.md
 ADMIN_EMAIL = "admin@corzaar.com"
@@ -36,9 +39,13 @@ test_data = {
     "cert_internal_id": None,
 }
 
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 def log_test(name: str, passed: bool, details: str = ""):
     """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
+    status = "[PASS]" if passed else "[FAIL]"
     print(f"{status} | {name}")
     if details:
         print(f"    {details}")
@@ -56,11 +63,11 @@ def make_request(method: str, endpoint: str, token: Optional[str] = None, json_d
         if method == "GET":
             resp = requests.get(url, headers=headers, params=params, timeout=10)
         elif method == "POST":
-            resp = requests.post(url, headers=headers, json=json_data, timeout=10)
+            resp = requests.post(url, headers=headers, json=json_data, params=params, timeout=10)
         elif method == "PUT":
-            resp = requests.put(url, headers=headers, json=json_data, timeout=10)
+            resp = requests.put(url, headers=headers, json=json_data, params=params, timeout=10)
         elif method == "DELETE":
-            resp = requests.delete(url, headers=headers, timeout=10)
+            resp = requests.delete(url, headers=headers, params=params, timeout=10)
         else:
             return False, {}, 0
         

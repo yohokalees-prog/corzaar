@@ -1,20 +1,81 @@
 import Constants from "expo-constants";
+import { Platform } from "react-native";
 
-const configuredUrl = Constants.expoConfig?.extra?.backendUrl || process.env.EXPO_BACKEND_URL || process.env.EXPO_PUBLIC_BACKEND_URL || "";
-const API_URL = configuredUrl.replace(/\/$/, "") + "/api";
+export function getBaseBackendUrl(): string {
+  // 1. Static config from app.json extra or .env
+  const configured =
+    Constants.expoConfig?.extra?.backendUrl ||
+    process.env.EXPO_PUBLIC_BACKEND_URL ||
+    process.env.EXPO_BACKEND_URL ||
+    "";
+
+  // 2. On Web:
+  if (Platform.OS === "web") {
+    if (configured && !configured.includes("localhost") && !configured.includes("127.0.0.1")) {
+      return configured.replace(/\/$/, "");
+    }
+    if (typeof window !== "undefined" && window.location?.hostname) {
+      return `http://${window.location.hostname}:8000`;
+    }
+    return "http://localhost:8000";
+  }
+
+  // 3. On Mobile (iOS / Android):
+  // If explicitly configured with a non-local production URL (e.g. https://api.corzaar.com), use it directly
+  if (configured && !configured.includes("localhost") && !configured.includes("127.0.0.1")) {
+    return configured.replace(/\/$/, "");
+  }
+
+  // Detect host IP from Expo Metro packager connection
+  const hostUri =
+    Constants.expoConfig?.hostUri ||
+    (Constants as any).manifest2?.extra?.expoGo?.debuggerHost ||
+    (Constants as any).manifest2?.extra?.expoClient?.hostUri ||
+    (Constants as any).manifest?.debuggerHost ||
+    (Constants as any).expoGoConfig?.debuggerHost;
+
+  const hostIp = hostUri ? hostUri.split(":")[0] : null;
+
+  if (hostIp && hostIp !== "localhost" && hostIp !== "127.0.0.1") {
+    return `http://${hostIp}:8000`;
+  }
+
+  // Fallback for Android emulator when hostUri is unavailable
+  if (Platform.OS === "android") {
+    return "http://10.0.2.2:8000";
+  }
+
+  // Default fallback LAN IP of dev machine
+  return "http://192.168.1.11:8000";
+}
+
+export const BACKEND_URL = getBaseBackendUrl();
+export const API_URL = `${BACKEND_URL}/api`;
+
+if (__DEV__) {
+  console.log(`[CORZAAR] API Target: ${API_URL} (${Platform.OS})`);
+}
 
 export async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.headers || {}),
-    },
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || data.message || "Something went wrong");
-  return data as T;
+  const url = `${API_URL}${path}`;
+  try {
+    const response = await fetch(url, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(options.headers || {}),
+      },
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || data.message || "Something went wrong");
+    return data as T;
+  } catch (error: any) {
+    if (__DEV__) {
+      console.warn(`[CORZAAR API] ${options.method || "GET"} ${url} failed:`, error?.message || error);
+    }
+    throw error;
+  }
 }
 
 export const get = <T,>(path: string, token?: string) => request<T>(path, {}, token);
