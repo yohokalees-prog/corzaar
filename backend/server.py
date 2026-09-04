@@ -263,7 +263,54 @@ class CashoutAction(BaseModel):
     reference: str = ""
 
 
+class CertTemplateCreate(BaseModel):
+    name: str
+    style: str = "classic"  # classic | modern | bold
+    accent_color: str = "#1E3A5F"
+    signatory: str = ""
+    image_base64: Optional[str] = None  # optional custom background PNG/JPG data URI
+
+
+class CertConfigUpdate(BaseModel):
+    enabled: bool = True
+    template_id: Optional[str] = None
+    certificate_name: Optional[str] = None
+    completion_percent: int = Field(default=100, ge=10, le=100)
+    issue_method: str = "automatic"  # automatic | manual
+
+
 MIN_CASHOUT = 500  # rupees
+CERT_TEMPLATE_STYLES = ["classic", "modern", "bold"]
+
+# Popular location shortcuts (dynamic-ready; falls back to this list)
+POPULAR_LOCATIONS = ["Chennai", "Bengaluru", "Mumbai", "Hyderabad", "Delhi", "Pune"]
+DEFAULT_CATEGORIES = [
+    {"key": "Design", "icon": "color-palette-outline"},
+    {"key": "Technology", "icon": "code-slash-outline"},
+    {"key": "AI / Machine Learning", "icon": "hardware-chip-outline"},
+    {"key": "Data Science", "icon": "analytics-outline"},
+    {"key": "Business", "icon": "briefcase-outline"},
+    {"key": "Marketing", "icon": "megaphone-outline"},
+    {"key": "Finance", "icon": "cash-outline"},
+    {"key": "Language", "icon": "language-outline"},
+    {"key": "Healthcare", "icon": "medkit-outline"},
+    {"key": "Engineering", "icon": "construct-outline"},
+]
+
+
+def gen_cert_id(institute_id: str, course_id: str) -> str:
+    inst = "".join(ch for ch in (institute_id or "INST").upper() if ch.isalnum())[:4] or "INST"
+    crs = "".join(ch for ch in (course_id or "CRSE").upper() if ch.isalnum())[:4] or "CRSE"
+    return f"CORZAAR-{inst}-{crs}-{secrets.token_hex(4).upper()}"
+
+
+def _verify_base_url(request: Optional[Request] = None) -> str:
+    origin = ""
+    if request is not None:
+        origin = str(request.base_url).rstrip("/")
+    if not origin:
+        origin = (APP_PAYMENT_RETURN_URL or "https://corzaar.app").split("/api/")[0].rstrip("/")
+    return origin
 
 
 # ---------- Seed ----------
@@ -348,19 +395,121 @@ async def admin_verify(payload: AdminVerify) -> Dict[str, Any]:
 async def home() -> Dict[str, Any]:
     courses = public_many(await db.courses.find({"status": "published"}, {"_id": 0}).sort("rating", -1).to_list(20))
     institutes = public_many(await db.institutes.find({"status": "approved"}, {"_id": 0}).sort("rating", -1).to_list(10))
-    return {"hero": {"eyebrow": "LEARN WITH PURPOSE", "title": "Your next chapter starts here.", "subtitle": "Discover trusted institutes, practical courses, and a path that feels like yours.", "offer": "Scholarships up to 40% this month"}, "courses": courses, "institutes": institutes, "categories": ["All", "Design", "Technology", "Business", "Marketing"]}
+    # Derive live categories from course data + defaults
+    live_cats = sorted({c.get("category") for c in courses if c.get("category")})
+    icon_map = {c["key"]: c["icon"] for c in DEFAULT_CATEGORIES}
+    discovery_cats = [{"key": k, "icon": icon_map.get(k, "school-outline")} for k in (live_cats or [c["key"] for c in DEFAULT_CATEGORIES])]
+    # Derive live locations from institutes + defaults
+    live_locs = sorted({(i.get("city") or "").strip() for i in institutes if (i.get("city") or "").strip()})
+    return {
+        "hero": {"eyebrow": "LEARN WITH PURPOSE", "title": "Your next chapter starts here.", "subtitle": "Discover trusted institutes, practical courses, and a path that feels like yours.", "offer": "Scholarships up to 40% this month"},
+        "courses": courses,
+        "institutes": institutes,
+        "categories": ["All"] + [c["key"] for c in discovery_cats],
+        "discovery_categories": discovery_cats,
+        "popular_locations": (live_locs or POPULAR_LOCATIONS)[:8],
+        "duration_buckets": [
+            {"key": "under_1m", "label": "Under 1 month"},
+            {"key": "1_3m", "label": "1–3 months"},
+            {"key": "3_6m", "label": "3–6 months"},
+            {"key": "6_12m", "label": "6–12 months"},
+            {"key": "over_1y", "label": "1+ year"},
+        ],
+    }
+
+
+def _duration_weeks(text: str) -> Optional[int]:
+    """Parse '10 weeks' / '3 months' / '1 year' → total weeks."""
+    if not text:
+        return None
+    import re
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(week|month|year|day)", str(text).lower())
+    if not match:
+        return None
+    n = float(match.group(1))
+    unit = match.group(2)
+    if unit == "week":
+        return int(n)
+    if unit == "month":
+        return int(n * 4)
+    if unit == "year":
+        return int(n * 52)
+    if unit == "day":
+        return max(1, int(n / 7))
+    return None
+
+
+def _duration_matches(text: str, bucket: str) -> bool:
+    weeks = _duration_weeks(text)
+    if weeks is None:
+        return True  # don't exclude when we can't parse
+    if bucket == "under_1m":
+        return weeks < 4
+    if bucket == "1_3m":
+        return 4 <= weeks <= 12
+    if bucket == "3_6m":
+        return 12 < weeks <= 26
+    if bucket == "6_12m":
+        return 26 < weeks <= 52
+    if bucket == "over_1y":
+        return weeks > 52
+    return True
 
 
 @api.get("/courses")
-async def list_courses(q: str = "", category: str = "All", price_max: Optional[float] = None) -> List[Dict[str, Any]]:
+async def list_courses(
+    q: str = "",
+    category: str = "All",
+    price_max: Optional[float] = None,
+    price_min: Optional[float] = None,
+    min_rating: Optional[float] = None,
+    duration: Optional[str] = None,
+    mode: Optional[str] = None,
+    location: Optional[str] = None,
+    has_certificate: Optional[bool] = None,
+    free_only: Optional[bool] = None,
+    sort: str = "recommended",
+) -> List[Dict[str, Any]]:
     query: Dict[str, Any] = {"status": "published"}
     if q:
         query["$or"] = [{"title": {"$regex": q, "$options": "i"}}, {"description": {"$regex": q, "$options": "i"}}]
     if category and category != "All":
         query["category"] = category
+    price_expr: Dict[str, Any] = {}
     if price_max is not None:
-        query["fees"] = {"$lte": price_max}
-    return public_many(await db.courses.find(query, {"_id": 0}).sort("rating", -1).to_list(50))
+        price_expr["$lte"] = price_max
+    if price_min is not None:
+        price_expr["$gte"] = price_min
+    if free_only:
+        price_expr = {"$lte": 0}
+    if price_expr:
+        query["fees"] = price_expr
+    if min_rating is not None:
+        query["rating"] = {"$gte": float(min_rating)}
+    if mode:
+        query["mode"] = {"$regex": mode, "$options": "i"}
+    if has_certificate:
+        query["certificate_config.enabled"] = True
+    if location:
+        # match by institute city
+        inst_ids = [i["id"] for i in await db.institutes.find({"city": {"$regex": location, "$options": "i"}, "status": "approved"}, {"_id": 0, "id": 1}).to_list(100)]
+        if inst_ids:
+            query["institute_id"] = {"$in": inst_ids}
+        else:
+            return []
+    sort_key = ("rating", -1)
+    if sort == "newest":
+        sort_key = ("created_at", -1)
+    elif sort == "price_asc":
+        sort_key = ("fees", 1)
+    elif sort == "price_desc":
+        sort_key = ("fees", -1)
+    elif sort == "students":
+        sort_key = ("students", -1)
+    rows = public_many(await db.courses.find(query, {"_id": 0}).sort(*sort_key).to_list(100))
+    if duration and duration != "all":
+        rows = [r for r in rows if _duration_matches(r.get("duration", ""), duration)]
+    return rows
 
 
 @api.get("/courses/{course_id}")
@@ -922,30 +1071,136 @@ async def admin_activity(user: Dict[str, Any] = Depends(require_roles("admin")))
 
 
 # ---------- Progress & Certificates ----------
+async def _issue_or_pend_certificate(user: Dict[str, Any], enrollment: Dict[str, Any], course: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Create a Certificate record if not already issued; returns the certificate or None."""
+    existing = await db.certificates.find_one({"enrollment_id": enrollment["id"]}, {"_id": 0})
+    if existing:
+        return existing
+    cfg = course.get("certificate_config") or {}
+    if not cfg.get("enabled", True):
+        return None
+    institute_id = course.get("institute_id", "")
+    cert_id_str = gen_cert_id(institute_id, course["id"])
+    # avoid rare collision
+    while await db.certificates.find_one({"certificate_id": cert_id_str}):
+        cert_id_str = gen_cert_id(institute_id, course["id"])
+    method = (cfg.get("issue_method") or "automatic").lower()
+    status = "issued" if method == "automatic" else "pending_approval"
+    doc = {
+        "id": str(uuid.uuid4()),
+        "certificate_id": cert_id_str,
+        "student_id": user["id"],
+        "student_name": user.get("full_name") or "CORZAAR learner",
+        "course_id": course["id"],
+        "course_title": course.get("title") or "CORZAAR course",
+        "institute_id": institute_id,
+        "enrollment_id": enrollment["id"],
+        "template_id": cfg.get("template_id"),
+        "certificate_name": cfg.get("certificate_name") or "Certificate of Completion",
+        "merchant_id": course.get("merchant_id"),
+        "completion_date": now(),
+        "issue_date": now() if status == "issued" else None,
+        "issue_method": method,
+        "status": status,  # pending_approval | issued | revoked
+        "created_at": now(),
+    }
+    await db.certificates.insert_one(doc.copy())
+    if status == "issued":
+        await db.enrollments.update_one({"id": enrollment["id"]}, {"$set": {"certificate_id": cert_id_str, "completed_at": doc["completion_date"]}})
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "title": "Certificate ready", "body": f"Your certificate for {doc['course_title']} is ready.", "kind": "cert", "created_at": now(), "read": False})
+    else:
+        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "title": "Certificate pending approval", "body": f"Your completion for {doc['course_title']} is under merchant review.", "kind": "cert", "created_at": now(), "read": False})
+        # notify merchant
+        if course.get("merchant_id"):
+            await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": course["merchant_id"], "title": "Certificate awaiting approval", "body": f"{doc['student_name']} completed {doc['course_title']}.", "kind": "cert", "created_at": now(), "read": False})
+    return doc
+
+
 @api.post("/me/enrollments/{enrollment_id}/progress")
 async def update_progress(enrollment_id: str, payload: ProgressUpdate, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, Any]:
     enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
     if not enrollment:
         raise HTTPException(404, "Enrollment not found")
-    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0, "curriculum": 1, "title": 1})
+    course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0})
     if not course:
         raise HTTPException(404, "Course not found")
     curriculum = course.get("curriculum") or []
     completed = [c for c in payload.completed if c in curriculum]
     progress = int(round(len(completed) / max(1, len(curriculum)) * 100))
     updates = {"completed_items": completed, "progress": progress}
-    if curriculum and len(completed) == len(curriculum) and not enrollment.get("certificate_id"):
-        cert_id = f"CZ-CERT-{enrollment_id[:8].upper()}"
-        updates["certificate_id"] = cert_id
-        updates["completed_at"] = now()
-        await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "title": "Certificate ready", "body": f"You completed {course.get('title', 'a course')}. Download your certificate.", "kind": "cert", "created_at": now(), "read": False})
+    cfg = course.get("certificate_config") or {}
+    required = int(cfg.get("completion_percent") or 100)
+    if curriculum and progress >= required and cfg.get("enabled", True):
+        await db.enrollments.update_one({"id": enrollment_id}, {"$set": updates})
+        cert = await _issue_or_pend_certificate(user, {**enrollment, **updates}, course)
+        if cert and cert.get("status") == "issued":
+            updates["certificate_id"] = cert["certificate_id"]
+            updates["completed_at"] = cert["completion_date"]
     await db.enrollments.update_one({"id": enrollment_id}, {"$set": updates})
     fresh = await db.enrollments.find_one({"id": enrollment_id}, {"_id": 0})
     return public(fresh) or {}
 
 
+def _cert_html(name: str, course_title: str, institute_name: str, cert_id: str, issued_at: str, style: str = "classic", accent: str = "#1E3A5F", signatory: str = "", verify_url: str = "", status: str = "issued") -> str:
+    status_banner = ""
+    if status == "revoked":
+        status_banner = "<div style='background:#EF4444;color:#fff;padding:8px 12px;border-radius:10px;font-size:12px;font-weight:800;letter-spacing:1px;margin:12px auto;display:inline-block'>REVOKED</div>"
+    elif status == "pending_approval":
+        status_banner = "<div style='background:#F59E0B;color:#fff;padding:8px 12px;border-radius:10px;font-size:12px;font-weight:800;letter-spacing:1px;margin:12px auto;display:inline-block'>PENDING APPROVAL</div>"
+    accent2 = accent + "22"
+    bg = "#F7F9FC" if style != "bold" else "#0F1E33"
+    card_bg = "#FFFFFF" if style != "bold" else "#1E3A5F"
+    text_ink = "#0F1E33" if style != "bold" else "#FFFFFF"
+    text_muted = "#64748B" if style != "bold" else "#DFF5EB"
+    font_family = "'Georgia',serif" if style == "classic" else "-apple-system,system-ui,'Helvetica Neue',sans-serif"
+    qr_html = ""
+    if verify_url:
+        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=120x120&data={verify_url}"
+        qr_html = f"<div style='position:absolute;left:56px;bottom:56px;text-align:left'><img src='{qr_url}' width='96' height='96' alt='Verify QR' style='border-radius:8px;background:#fff;padding:4px'/><div style='font-size:9px;color:{text_muted};margin-top:6px;letter-spacing:.5px;font-family:-apple-system,sans-serif'>Scan to verify</div></div>"
+    signatory_row = f"<div style='margin-top:24px;color:{text_muted};font-size:11px;letter-spacing:1px;text-transform:uppercase'>Authorised · {signatory}</div>" if signatory else ""
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>CORZAAR Certificate · {name}</title><style>
+    :root{{color-scheme:light}}body{{font-family:{font_family};background:{bg};color:{text_ink};margin:0;padding:24px;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+    .cert{{background:{card_bg};max-width:820px;width:100%;padding:56px 48px;border-radius:20px;border:1px solid {accent}33;box-shadow:0 30px 60px rgba(15,30,51,.08);text-align:center;position:relative;overflow:hidden}}
+    .cert::before{{content:'';position:absolute;inset:16px;border:2px solid {accent};border-radius:14px;pointer-events:none;opacity:.5}}
+    .brand{{font-family:-apple-system,system-ui,sans-serif;letter-spacing:6px;font-size:12px;color:{accent};text-transform:uppercase;font-weight:800}}
+    h1{{font-size:44px;color:{accent};margin:24px 0 8px;letter-spacing:-.5px}}
+    .lead{{color:{text_muted};font-family:-apple-system,system-ui,sans-serif;font-size:14px}}
+    h2{{font-size:34px;color:{text_ink};margin:28px 0 6px;font-weight:700}}
+    .course{{font-size:20px;color:{accent};margin-top:8px;font-weight:700}}
+    .meta{{margin-top:26px;color:{text_muted};font-family:-apple-system,system-ui,sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase}}
+    .row{{display:flex;justify-content:space-between;margin-top:44px;font-family:-apple-system,system-ui,sans-serif;gap:12px;flex-wrap:wrap}}
+    .row div{{text-align:center;font-size:12px;color:{text_muted};min-width:120px}}
+    .row strong{{display:block;color:{text_ink};font-size:14px;margin-bottom:6px;letter-spacing:.5px}}
+    .seal{{position:absolute;right:56px;bottom:56px;width:80px;height:80px;border-radius:50%;background:#0EA5A0;color:#fff;display:flex;align-items:center;justify-content:center;font-family:-apple-system,system-ui,sans-serif;font-size:11px;font-weight:800;letter-spacing:1px;text-align:center;line-height:14px;padding:8px;box-sizing:border-box;transform:rotate(-8deg)}}
+    </style></head><body><div class=cert>
+      <div class=brand>CORZAAR · {status.replace('_', ' ').title()}</div>
+      {status_banner}
+      <h1>Certificate of Completion</h1>
+      <p class=lead>This is to certify that</p>
+      <h2>{name}</h2>
+      <p class=lead>has successfully completed</p>
+      <p class=course>{course_title}</p>
+      <p class=meta>Awarded by {institute_name} · {issued_at}</p>
+      {signatory_row}
+      <div class=row>
+        <div><strong>Certificate ID</strong>{cert_id}</div>
+        <div><strong>Issued</strong>{issued_at}</div>
+        <div><strong>Institute</strong>{institute_name}</div>
+      </div>
+      {qr_html}
+      <div class=seal>CORZAAR<br>VERIFIED</div>
+    </div></body></html>"""
+
+
+async def _load_template(template_id: Optional[str]) -> Dict[str, Any]:
+    if not template_id:
+        return {"style": "classic", "accent_color": "#1E3A5F", "signatory": ""}
+    tpl = await db.certificate_templates.find_one({"id": template_id}, {"_id": 0})
+    return tpl or {"style": "classic", "accent_color": "#1E3A5F", "signatory": ""}
+
+
 @api.get("/me/enrollments/{enrollment_id}/certificate", response_class=HTMLResponse)
-async def certificate(enrollment_id: str, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> str:
+async def certificate(enrollment_id: str, request: Request, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> str:
     token = None
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
@@ -960,42 +1215,22 @@ async def certificate(enrollment_id: str, authorization: Optional[str] = Header(
     user = await db.users.find_one({"id": payload.get("sub"), "role": "student"}, {"_id": 0})
     if not user:
         raise HTTPException(401, "User not found")
+    cert = await db.certificates.find_one({"enrollment_id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
     enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
-    if not enrollment or not enrollment.get("certificate_id"):
+    if not enrollment:
+        raise HTTPException(404, "Enrollment not found")
+    if not cert and enrollment.get("certificate_id"):
+        # legacy: no Certificate record but has certificate_id
+        cert = {"certificate_id": enrollment["certificate_id"], "status": "issued", "template_id": None, "certificate_name": "Certificate of Completion", "issue_date": enrollment.get("completed_at"), "completion_date": enrollment.get("completed_at")}
+    if not cert:
         raise HTTPException(404, "Certificate not available yet")
     course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
     institute = await db.institutes.find_one({"id": course.get("institute_id")}, {"_id": 0}) or {}
+    template = await _load_template(cert.get("template_id"))
     name = user.get("full_name") or "CORZAAR learner"
-    completed_at = enrollment.get("completed_at", "")[:10]
-    return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>CORZAAR Certificate · {name}</title><style>
-    :root{{color-scheme:light}}body{{font-family:'Georgia',serif;background:#F7F9FC;color:#0F1E33;margin:0;padding:24px;display:flex;align-items:center;justify-content:center;min-height:100vh}}
-    .cert{{background:#fff;max-width:820px;width:100%;padding:56px 48px;border-radius:20px;border:1px solid #E2E8F0;box-shadow:0 30px 60px rgba(15,30,51,.08);text-align:center;position:relative;overflow:hidden}}
-    .cert::before{{content:'';position:absolute;inset:16px;border:2px solid #1E3A5F;border-radius:14px;pointer-events:none;opacity:.6}}
-    .brand{{font-family:-apple-system,system-ui,sans-serif;letter-spacing:6px;font-size:12px;color:#3B5F84;text-transform:uppercase;font-weight:800}}
-    h1{{font-size:44px;color:#1E3A5F;margin:24px 0 8px;letter-spacing:-.5px}}
-    .lead{{color:#64748B;font-family:-apple-system,system-ui,sans-serif;font-size:14px}}
-    h2{{font-size:34px;color:#0F1E33;margin:28px 0 6px;font-weight:700}}
-    .course{{font-size:20px;color:#1E3A5F;margin-top:8px;font-weight:700}}
-    .meta{{margin-top:26px;color:#64748B;font-family:-apple-system,system-ui,sans-serif;font-size:12px;letter-spacing:1px;text-transform:uppercase}}
-    .row{{display:flex;justify-content:space-between;margin-top:44px;font-family:-apple-system,system-ui,sans-serif}}
-    .row div{{text-align:center;font-size:12px;color:#64748B}}
-    .row strong{{display:block;color:#0F1E33;font-size:14px;margin-bottom:6px;letter-spacing:.5px}}
-    .seal{{position:absolute;right:56px;bottom:56px;width:80px;height:80px;border-radius:50%;background:#0EA5A0;color:#fff;display:flex;align-items:center;justify-content:center;font-family:-apple-system,system-ui,sans-serif;font-size:11px;font-weight:800;letter-spacing:1px;text-align:center;line-height:14px;padding:8px;box-sizing:border-box;transform:rotate(-8deg)}}
-    </style></head><body><div class=cert>
-      <div class=brand>CORZAAR · Certificate of Completion</div>
-      <h1>Certificate of Completion</h1>
-      <p class=lead>This is to certify that</p>
-      <h2>{name}</h2>
-      <p class=lead>has successfully completed</p>
-      <p class=course>{course.get('title', 'the CORZAAR course')}</p>
-      <p class=meta>Awarded by {institute.get('name', 'CORZAAR')} · {completed_at}</p>
-      <div class=row>
-        <div><strong>Certificate ID</strong>{enrollment['certificate_id']}</div>
-        <div><strong>Issued</strong>{completed_at}</div>
-        <div><strong>Institute</strong>{institute.get('name', 'CORZAAR')}</div>
-      </div>
-      <div class=seal>CORZAAR<br>VERIFIED</div>
-    </div></body></html>"""
+    issued_at = ((cert.get("issue_date") or cert.get("completion_date") or "")[:10]) or datetime.now(timezone.utc).date().isoformat()
+    verify_url = f"{_verify_base_url(request)}/api/certificates/verify/{cert['certificate_id']}"
+    return _cert_html(name, course.get("title", "the CORZAAR course"), institute.get("name", "CORZAAR"), cert["certificate_id"], issued_at, template.get("style", "classic"), template.get("accent_color", "#1E3A5F"), template.get("signatory", ""), verify_url, cert.get("status", "issued"))
 
 
 # ---------- Referrals & Wallet ----------
@@ -1051,60 +1286,75 @@ async def merchant_payouts(user: Dict[str, Any] = Depends(require_roles("merchan
 
 
 # ---------- Certificate PDF + share ----------
-def _render_certificate_pdf(name: str, course_title: str, institute_name: str, cert_id: str, issued_at: str) -> bytes:
+def _render_certificate_pdf(name: str, course_title: str, institute_name: str, cert_id: str, issued_at: str, style: str = "classic", accent: str = "#1E3A5F", signatory: str = "", verify_url: str = "") -> bytes:
     buf = io.BytesIO()
     page = landscape(A4)
     c = canvas.Canvas(buf, pagesize=page)
     w, h = page
+    is_bold = style == "bold"
+    bg_hex = "#0F1E33" if is_bold else "#F7F9FC"
+    card_hex = "#1E3A5F" if is_bold else "#FFFFFF"
+    ink_hex = "#FFFFFF" if is_bold else "#0F1E33"
+    muted_hex = "#DFF5EB" if is_bold else "#64748B"
     # Background
-    c.setFillColor(HexColor("#F7F9FC"))
+    c.setFillColor(HexColor(bg_hex))
     c.rect(0, 0, w, h, fill=1, stroke=0)
     # Inner card
     margin = 22 * mm
-    c.setFillColor(HexColor("#FFFFFF"))
+    c.setFillColor(HexColor(card_hex))
     c.roundRect(margin, margin, w - 2 * margin, h - 2 * margin, 12, fill=1, stroke=0)
     # Border
-    c.setStrokeColor(HexColor("#1E3A5F"))
+    c.setStrokeColor(HexColor(accent))
     c.setLineWidth(1.4)
     c.roundRect(margin + 8, margin + 8, w - 2 * margin - 16, h - 2 * margin - 16, 8, fill=0, stroke=1)
     # Brand
-    c.setFillColor(HexColor("#3B5F84"))
+    c.setFillColor(HexColor(accent))
     c.setFont("Helvetica-Bold", 10)
     c.drawCentredString(w / 2, h - margin - 22, "CORZAAR  ·  CERTIFICATE OF COMPLETION")
     # Title
-    c.setFillColor(HexColor("#1E3A5F"))
+    c.setFillColor(HexColor(accent))
     c.setFont("Helvetica-Bold", 34)
     c.drawCentredString(w / 2, h - margin - 66, "Certificate of Completion")
     # Lead
-    c.setFillColor(HexColor("#64748B"))
+    c.setFillColor(HexColor(muted_hex))
     c.setFont("Helvetica", 12)
     c.drawCentredString(w / 2, h - margin - 92, "This is to certify that")
     # Name
-    c.setFillColor(HexColor("#0F1E33"))
+    c.setFillColor(HexColor(ink_hex))
     c.setFont("Helvetica-Bold", 28)
     c.drawCentredString(w / 2, h - margin - 128, name)
     # Lead
-    c.setFillColor(HexColor("#64748B"))
+    c.setFillColor(HexColor(muted_hex))
     c.setFont("Helvetica", 12)
     c.drawCentredString(w / 2, h - margin - 152, "has successfully completed")
     # Course
-    c.setFillColor(HexColor("#1E3A5F"))
+    c.setFillColor(HexColor(accent))
     c.setFont("Helvetica-Bold", 18)
     c.drawCentredString(w / 2, h - margin - 178, course_title)
     # Meta
-    c.setFillColor(HexColor("#64748B"))
+    c.setFillColor(HexColor(muted_hex))
     c.setFont("Helvetica", 10)
     c.drawCentredString(w / 2, h - margin - 202, f"Awarded by {institute_name}  ·  {issued_at}")
+    # Signatory (optional)
+    if signatory:
+        c.setFillColor(HexColor(muted_hex))
+        c.setFont("Helvetica-Oblique", 10)
+        c.drawCentredString(w / 2, h - margin - 224, f"Authorised · {signatory}")
     # Footer row
     footer_y = margin + 34
     for i, (label, value) in enumerate([("CERTIFICATE ID", cert_id), ("ISSUED", issued_at), ("INSTITUTE", institute_name)]):
         x = margin + 40 + i * ((w - 2 * margin - 80) / 3)
-        c.setFillColor(HexColor("#64748B"))
+        c.setFillColor(HexColor(muted_hex))
         c.setFont("Helvetica-Bold", 8)
         c.drawString(x, footer_y + 14, label)
-        c.setFillColor(HexColor("#0F1E33"))
+        c.setFillColor(HexColor(ink_hex))
         c.setFont("Helvetica", 11)
         c.drawString(x, footer_y, value)
+    # Verify URL
+    if verify_url:
+        c.setFillColor(HexColor(muted_hex))
+        c.setFont("Helvetica", 8)
+        c.drawCentredString(w / 2, margin + 14, f"Verify at: {verify_url}")
     # Seal
     c.setFillColor(HexColor("#0EA5A0"))
     c.circle(w - margin - 48, margin + 60, 30, fill=1, stroke=0)
@@ -1136,32 +1386,41 @@ async def _cert_auth(authorization: Optional[str], auth: Optional[str]) -> Dict[
 
 
 @api.get("/me/enrollments/{enrollment_id}/certificate.pdf")
-async def certificate_pdf(enrollment_id: str, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> StreamingResponse:
+async def certificate_pdf(enrollment_id: str, request: Request, authorization: Optional[str] = Header(default=None), auth: Optional[str] = None) -> StreamingResponse:
     user = await _cert_auth(authorization, auth)
     enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
-    if not enrollment or not enrollment.get("certificate_id"):
+    if not enrollment:
+        raise HTTPException(404, "Enrollment not found")
+    cert = await db.certificates.find_one({"enrollment_id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
+    if not cert and enrollment.get("certificate_id"):
+        cert = {"certificate_id": enrollment["certificate_id"], "status": "issued", "template_id": None, "completion_date": enrollment.get("completed_at"), "issue_date": enrollment.get("completed_at")}
+    if not cert or cert.get("status") != "issued":
         raise HTTPException(404, "Certificate not available yet")
     course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
     institute = await db.institutes.find_one({"id": course.get("institute_id")}, {"_id": 0}) or {}
-    pdf = _render_certificate_pdf(user.get("full_name") or "CORZAAR learner", course.get("title", "CORZAAR course"), institute.get("name", "CORZAAR"), enrollment["certificate_id"], (enrollment.get("completed_at", "")[:10]) or datetime.now(timezone.utc).date().isoformat())
-    filename = f"CORZAAR-{enrollment['certificate_id']}.pdf"
+    tpl = await _load_template(cert.get("template_id"))
+    issued_at = ((cert.get("issue_date") or cert.get("completion_date") or "")[:10]) or datetime.now(timezone.utc).date().isoformat()
+    verify_url = f"{_verify_base_url(request)}/api/certificates/verify/{cert['certificate_id']}/view"
+    pdf = _render_certificate_pdf(user.get("full_name") or "CORZAAR learner", course.get("title", "CORZAAR course"), institute.get("name", "CORZAAR"), cert["certificate_id"], issued_at, tpl.get("style", "classic"), tpl.get("accent_color", "#1E3A5F"), tpl.get("signatory", ""), verify_url)
+    filename = f"CORZAAR-{cert['certificate_id']}.pdf"
     return StreamingResponse(io.BytesIO(pdf), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @api.get("/me/enrollments/{enrollment_id}/share")
-async def certificate_share(enrollment_id: str, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, str]:
+async def certificate_share(enrollment_id: str, request: Request, user: Dict[str, Any] = Depends(require_roles("student"))) -> Dict[str, str]:
     enrollment = await db.enrollments.find_one({"id": enrollment_id, "student_id": user["id"]}, {"_id": 0})
     if not enrollment or not enrollment.get("certificate_id"):
         raise HTTPException(404, "Certificate not available yet")
     course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
-    base = (APP_PAYMENT_RETURN_URL or "https://corzaar.app").split("/api/")[0].rstrip("/")
+    base = _verify_base_url(request)
     cert_url = f"{base}/api/me/enrollments/{enrollment_id}/certificate"
+    verify_url = f"{base}/api/certificates/verify/{enrollment['certificate_id']}/view"
     from urllib.parse import quote_plus
     title = f"I completed {course.get('title', 'a CORZAAR course')}"
-    linkedin = f"https://www.linkedin.com/sharing/share-offsite/?url={quote_plus(cert_url)}"
-    twitter = f"https://twitter.com/intent/tweet?text={quote_plus(title + ' on CORZAAR')}&url={quote_plus(cert_url)}"
-    whatsapp = f"https://wa.me/?text={quote_plus(title + ' — ' + cert_url)}"
-    return {"certificate_url": cert_url, "pdf_url": f"{cert_url}.pdf", "linkedin": linkedin, "twitter": twitter, "whatsapp": whatsapp, "title": title}
+    linkedin = f"https://www.linkedin.com/sharing/share-offsite/?url={quote_plus(verify_url)}"
+    twitter = f"https://twitter.com/intent/tweet?text={quote_plus(title + ' on CORZAAR')}&url={quote_plus(verify_url)}"
+    whatsapp = f"https://wa.me/?text={quote_plus(title + ' — ' + verify_url)}"
+    return {"certificate_url": cert_url, "pdf_url": f"{cert_url}.pdf", "verify_url": verify_url, "linkedin": linkedin, "twitter": twitter, "whatsapp": whatsapp, "title": title}
 
 
 # ---------- Merchant Insights ----------
@@ -1251,6 +1510,159 @@ async def cashout_action(cashout_id: str, payload: CashoutAction, status: str = 
     await db.cashouts.update_one({"id": cashout_id}, {"$set": updates})
     await audit(user, f"Cashout {status}", "Cashouts", f"₹{cashout['amount']:.0f}", cashout_id)
     return {"id": cashout_id, "status": status}
+
+
+# ---------- Certificate templates & configuration ----------
+@api.get("/merchant/certificate-templates")
+async def merchant_cert_templates(user: Dict[str, Any] = Depends(require_roles("merchant"))) -> List[Dict[str, Any]]:
+    return public_many(await db.certificate_templates.find({"merchant_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50))
+
+
+@api.post("/merchant/certificate-templates")
+async def create_cert_template(payload: CertTemplateCreate, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    style = payload.style.lower()
+    if style not in CERT_TEMPLATE_STYLES:
+        raise HTTPException(400, f"Style must be one of {CERT_TEMPLATE_STYLES}")
+    if payload.image_base64 and len(payload.image_base64) > 800_000:
+        raise HTTPException(400, "Template image too large (keep under 600KB)")
+    tpl = {"id": str(uuid.uuid4()), "merchant_id": user["id"], "name": payload.name, "style": style, "accent_color": payload.accent_color, "signatory": payload.signatory, "image_base64": payload.image_base64, "status": "active", "created_at": now(), "updated_at": now()}
+    await db.certificate_templates.insert_one(tpl.copy())
+    await audit(user, "Certificate template created", "Certificates", payload.name, tpl["id"])
+    return tpl
+
+
+@api.delete("/merchant/certificate-templates/{template_id}")
+async def delete_cert_template(template_id: str, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    result = await db.certificate_templates.delete_one({"id": template_id, "merchant_id": user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(404, "Template not found")
+    # unlink from any courses using it
+    await db.courses.update_many({"certificate_config.template_id": template_id}, {"$set": {"certificate_config.template_id": None}})
+    await audit(user, "Certificate template deleted", "Certificates", "", template_id)
+    return {"removed": template_id}
+
+
+@api.put("/merchant/courses/{course_id}/certificate")
+async def set_course_cert_config(course_id: str, payload: CertConfigUpdate, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    course = await db.courses.find_one({"id": course_id, "merchant_id": user["id"]}, {"_id": 0})
+    if not course:
+        raise HTTPException(404, "Course not found")
+    method = payload.issue_method.lower()
+    if method not in ("automatic", "manual"):
+        raise HTTPException(400, "issue_method must be automatic or manual")
+    if payload.template_id:
+        tpl = await db.certificate_templates.find_one({"id": payload.template_id, "merchant_id": user["id"]}, {"_id": 0})
+        if not tpl:
+            raise HTTPException(400, "Template not owned by merchant")
+    cfg = {"enabled": payload.enabled, "template_id": payload.template_id, "certificate_name": payload.certificate_name or "Certificate of Completion", "completion_percent": payload.completion_percent, "issue_method": method}
+    await db.courses.update_one({"id": course_id}, {"$set": {"certificate_config": cfg}})
+    await audit(user, "Certificate config updated", "Certificates", course.get("title", ""), course_id)
+    return {"course_id": course_id, "certificate_config": cfg}
+
+
+@api.get("/merchant/certificates")
+async def merchant_certificates(user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    rows = public_many(await db.certificates.find({"merchant_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(300))
+    counts = {"issued": 0, "pending_approval": 0, "revoked": 0}
+    for r in rows:
+        counts[r.get("status", "issued")] = counts.get(r.get("status", "issued"), 0) + 1
+    return {"certificates": rows, "counts": counts}
+
+
+@api.post("/merchant/certificates/{cert_id}/approve")
+async def merchant_approve_cert(cert_id: str, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    cert = await db.certificates.find_one({"id": cert_id, "merchant_id": user["id"]}, {"_id": 0})
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    if cert["status"] != "pending_approval":
+        raise HTTPException(400, "Certificate not pending approval")
+    await db.certificates.update_one({"id": cert_id}, {"$set": {"status": "issued", "issue_date": now(), "approved_by": user["id"]}})
+    await db.enrollments.update_one({"id": cert["enrollment_id"]}, {"$set": {"certificate_id": cert["certificate_id"], "completed_at": cert.get("completion_date")}})
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cert["student_id"], "title": "Certificate issued", "body": f"Your certificate for {cert.get('course_title', 'the course')} is ready.", "kind": "cert", "created_at": now(), "read": False})
+    await audit(user, "Certificate approved", "Certificates", cert.get("course_title", ""), cert_id)
+    return {"id": cert_id, "status": "issued"}
+
+
+@api.post("/merchant/certificates/{cert_id}/reject")
+async def merchant_reject_cert(cert_id: str, user: Dict[str, Any] = Depends(require_roles("merchant"))) -> Dict[str, Any]:
+    cert = await db.certificates.find_one({"id": cert_id, "merchant_id": user["id"]}, {"_id": 0})
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    await db.certificates.update_one({"id": cert_id}, {"$set": {"status": "revoked", "revoked_by": user["id"], "revoked_at": now(), "revoke_reason": "Rejected during approval"}})
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cert["student_id"], "title": "Certificate rejected", "body": f"Your certificate request for {cert.get('course_title', 'the course')} was not approved.", "kind": "cert", "created_at": now(), "read": False})
+    await audit(user, "Certificate rejected", "Certificates", cert.get("course_title", ""), cert_id)
+    return {"id": cert_id, "status": "revoked"}
+
+
+@api.get("/admin/certificates")
+async def admin_certificates(user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    rows = public_many(await db.certificates.find({}, {"_id": 0}).sort("created_at", -1).to_list(500))
+    templates = public_many(await db.certificate_templates.find({}, {"_id": 0}).to_list(200))
+    counts = {"issued": 0, "pending_approval": 0, "revoked": 0, "total": len(rows)}
+    for r in rows:
+        counts[r.get("status", "issued")] = counts.get(r.get("status", "issued"), 0) + 1
+    return {"certificates": rows, "templates": templates, "counts": counts}
+
+
+@api.post("/admin/certificates/{cert_id}/revoke")
+async def admin_revoke_cert(cert_id: str, user: Dict[str, Any] = Depends(require_roles("admin"))) -> Dict[str, Any]:
+    cert = await db.certificates.find_one({"id": cert_id}, {"_id": 0})
+    if not cert:
+        raise HTTPException(404, "Certificate not found")
+    await db.certificates.update_one({"id": cert_id}, {"$set": {"status": "revoked", "revoked_by": user["id"], "revoked_at": now(), "revoke_reason": "Admin revocation"}})
+    await db.enrollments.update_one({"id": cert["enrollment_id"]}, {"$unset": {"certificate_id": ""}})
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": cert["student_id"], "title": "Certificate revoked", "body": f"Your certificate for {cert.get('course_title', 'the course')} was revoked by CORZAAR admin.", "kind": "cert", "created_at": now(), "read": False})
+    await audit(user, "Certificate revoked", "Certificates", cert.get("course_title", ""), cert_id)
+    return {"id": cert_id, "status": "revoked"}
+
+
+@api.get("/me/certificates")
+async def my_certificates(user: Dict[str, Any] = Depends(require_roles("student"))) -> List[Dict[str, Any]]:
+    return public_many(await db.certificates.find({"student_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100))
+
+
+# ---- PUBLIC verification (no auth) ----
+@api.get("/certificates/verify/{cert_id}")
+async def verify_certificate(cert_id: str, request: Request) -> Dict[str, Any]:
+    cert = await db.certificates.find_one({"certificate_id": cert_id}, {"_id": 0})
+    if not cert:
+        # legacy: check enrollments.certificate_id
+        enrollment = await db.enrollments.find_one({"certificate_id": cert_id}, {"_id": 0})
+        if enrollment:
+            student = await db.users.find_one({"id": enrollment["student_id"]}, {"_id": 0}) or {}
+            course = await db.courses.find_one({"id": enrollment["course_id"]}, {"_id": 0}) or {}
+            institute = await db.institutes.find_one({"id": course.get("institute_id")}, {"_id": 0}) or {}
+            return {"valid": True, "status": "issued", "certificate_id": cert_id, "student_name": student.get("full_name") or "CORZAAR learner", "course_title": course.get("title"), "institute_name": institute.get("name"), "issue_date": enrollment.get("completed_at"), "completion_date": enrollment.get("completed_at")}
+        return {"valid": False, "status": "invalid", "certificate_id": cert_id, "message": "Certificate not found"}
+    valid = cert.get("status") == "issued"
+    course = await db.courses.find_one({"id": cert["course_id"]}, {"_id": 0}) or {}
+    institute = await db.institutes.find_one({"id": cert.get("institute_id")}, {"_id": 0}) or {}
+    return {
+        "valid": valid,
+        "status": cert.get("status"),
+        "certificate_id": cert_id,
+        "student_name": cert.get("student_name"),
+        "course_title": cert.get("course_title") or course.get("title"),
+        "institute_name": institute.get("name"),
+        "issue_date": cert.get("issue_date"),
+        "completion_date": cert.get("completion_date"),
+    }
+
+
+@api.get("/certificates/verify/{cert_id}/view", response_class=HTMLResponse)
+async def verify_certificate_html(cert_id: str, request: Request) -> str:
+    result = await verify_certificate(cert_id, request)
+    valid = result.get("valid")
+    status = result.get("status", "invalid")
+    color = "#0EA5A0" if valid else ("#F59E0B" if status == "pending_approval" else "#EF4444")
+    label = "VALID" if valid else ("PENDING" if status == "pending_approval" else "INVALID")
+    body_rows = ""
+    for k, label_k in [("student_name", "Student"), ("course_title", "Course"), ("institute_name", "Institute"), ("issue_date", "Issue date"), ("completion_date", "Completion date"), ("certificate_id", "Certificate ID")]:
+        v = result.get(k) or "—"
+        if isinstance(v, str) and "T" in v:
+            v = v[:10]
+        body_rows += f"<tr><td style='padding:10px 12px;color:#64748B;font-size:12px;letter-spacing:.5px'>{label_k}</td><td style='padding:10px 12px;color:#0F1E33;font-size:14px;font-weight:600'>{v}</td></tr>"
+    return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Verify · {cert_id}</title><style>body{{font-family:-apple-system,system-ui,sans-serif;background:#F7F9FC;color:#0F1E33;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}}.card{{max-width:520px;width:100%;background:#fff;border-radius:20px;box-shadow:0 20px 40px rgba(15,30,51,.08);padding:32px;border:1px solid #E2E8F0}}.badge{{display:inline-block;padding:8px 16px;border-radius:999px;font-size:12px;font-weight:800;letter-spacing:1.5px;color:#fff;background:{color}}}h1{{font-size:22px;color:#1E3A5F;margin:16px 0 4px}}p{{color:#64748B;font-size:14px;margin:0}}table{{width:100%;margin-top:20px;border-collapse:collapse}}tr{{border-bottom:1px solid #F1F5F9}}tr:last-child{{border-bottom:0}}.foot{{margin-top:20px;font-size:12px;color:#64748B}}</style></head><body><div class=card><div class=badge>{label}</div><h1>CORZAAR Certificate Verification</h1><p>{'This certificate is authentic and issued by CORZAAR.' if valid else 'This certificate could not be verified.'}</p><table>{body_rows}</table><p class=foot>Verified via CORZAAR · corzaar.app</p></div></body></html>"""
 
 
 # ---------- Session reminders (computed on demand) ----------

@@ -22,7 +22,7 @@ export const post = <T,>(path: string, body: unknown, token?: string) => request
 export const put = <T,>(path: string, body: unknown, token?: string) => request<T>(path, { method: "PUT", body: JSON.stringify(body) }, token);
 export const remove = <T,>(path: string, token?: string) => request<T>(path, { method: "DELETE" }, token);
 
-export type Course = { id: string; title: string; category: string; duration: string; fees: number; rating: number; students: number; mode: string; description: string; image_key: string; institute_id: string; status?: string; curriculum?: string[]; reviews_count?: number };
+export type Course = { id: string; title: string; category: string; duration: string; fees: number; rating: number; students: number; mode: string; description: string; image_key: string; institute_id: string; status?: string; curriculum?: string[]; reviews_count?: number; merchant_id?: string; certificate_config?: CertConfig };
 export type Institute = { id: string; name: string; city: string; rating: number; accreditation: string; students: string; description: string; image_key: string; status: string };
 export type User = { id: string; role: "student" | "merchant" | "admin"; full_name?: string; mobile?: string; email?: string; profile_complete?: boolean; referral_code?: string; wallet_balance?: number };
 export type Review = { id: string; rating: number; text: string; name: string; created_at: string };
@@ -37,4 +37,11 @@ export type PayoutHistory = { id: string; merchant_id: string; amount: number; m
 export type PayoutLedger = { merchant_id: string; merchant_name: string; institute?: any; gross: number; paid_out: number; pending: number };
 export type Cashout = { id: string; student_id?: string; student_name?: string; amount: number; upi_id: string; status: string; reference?: string; created_at: string };
 export type Insights = { rating_trend: { week: string; average: number; count: number }[]; top_courses: { id: string; title: string; rating: number; reviews_count: number; students: number }[]; curriculum_dropoff: { id: string; title: string; enrolled: number; items: { item: string; completed: number; pct: number }[] }[] };
-export type ShareLinks = { certificate_url: string; pdf_url: string; linkedin: string; twitter: string; whatsapp: string; title: string };
+export type ShareLinks = { certificate_url: string; pdf_url: string; verify_url?: string; linkedin: string; twitter: string; whatsapp: string; title: string };
+export type CertConfig = { enabled: boolean; template_id?: string | null; certificate_name?: string; completion_percent: number; issue_method: "automatic" | "manual" };
+export type CertTemplate = { id: string; name: string; style: "classic" | "modern" | "bold"; accent_color: string; signatory?: string; image_base64?: string | null; status: string; merchant_id: string; created_at: string };
+export type Certificate = { id: string; certificate_id: string; student_id: string; student_name?: string; course_id: string; course_title?: string; institute_id: string; enrollment_id: string; template_id?: string | null; certificate_name?: string; merchant_id?: string; completion_date?: string; issue_date?: string; issue_method?: string; status: "issued" | "pending_approval" | "revoked"; created_at: string };
+export type DiscoveryCategory = { key: string; icon: string };
+export type DurationBucket = { key: string; label: string };
+export type Home = { hero: { eyebrow: string; title: string; subtitle: string; offer: string }; courses: Course[]; institutes: Institute[]; categories: string[]; discovery_categories?: DiscoveryCategory[]; popular_locations?: string[]; duration_buckets?: DurationBucket[] };
+export type VerifyResult = { valid: boolean; status: string; certificate_id: string; student_name?: string; course_title?: string; institute_name?: string; issue_date?: string; completion_date?: string; message?: string };
